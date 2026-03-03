@@ -1,0 +1,31 @@
+name = "pageshield"
+main = "src/index.js"
+compatibility_date = "2026-03-02"
+workers_dev = true
+account_id = "1f6a47bf7e2f4a9b77a90d9fa47294e1"
+version_metadata = { binding = "SHIELD_VERSION_METADATA" }
+
+# Route coverage:
+# - Protect all on ryzeon.wtf/*
+# - Protect all on *.ryzeon.wtf/*
+# - In code: eu-api.ryzeon.wtf only protects "/"
+routes = [
+  { pattern = "ryzeon.wtf/*", zone_name = "ryzeon.wtf" },
+  { pattern = "*.ryzeon.wtf/*", zone_name = "ryzeon.wtf" }
+]
+
+# ── KV namespace for analytics counters ──
+[[kv_namespaces]]
+binding = "SHIELD_KV"
+id = "dac7ffd850e24c948a0ac4f5ed4c2b10"
+
+# ── D1 database for event logs ──
+[[d1_databases]]
+binding = "SHIELD_DB"
+database_name = "shield_logs"
+database_id = "99a8605d-8b63-4a71-bb90-5d94a232d7b5"
+
+# ── R2 bucket for blocked request snapshots ──
+[[r2_buckets]]
+binding = "SHIELD_R2"
+bucket_name = "shield-storage"
