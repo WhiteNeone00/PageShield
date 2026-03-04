@@ -12,7 +12,27 @@ function blockPageBase(opts) {
     reason = '', icon = '\uD83D\uDEE1\uFE0F', accentColor = '#e74c3c',
     secondaryColor = '#ff6b6b', statusText = 'Blocked', extraInfo = '',
     showContact = true, retryAfter = 0,
+    announcementText = '', richParticles = false,
   } = opts;
+  const particlesHtml = richParticles
+    ? `
+    <div class="particle" style="left:8%;--dur:7s;--delay:0s"></div>
+    <div class="particle" style="left:18%;--dur:9s;--delay:1.2s"></div>
+    <div class="particle" style="left:28%;--dur:6s;--delay:2.4s"></div>
+    <div class="particle" style="left:42%;--dur:10s;--delay:.5s"></div>
+    <div class="particle" style="left:55%;--dur:7.5s;--delay:1.8s"></div>
+    <div class="particle" style="left:68%;--dur:8.5s;--delay:.8s"></div>
+    <div class="particle" style="left:78%;--dur:6.5s;--delay:3s"></div>
+    <div class="particle" style="left:88%;--dur:9.5s;--delay:2s"></div>
+    <div class="particle" style="left:95%;--dur:7s;--delay:1s"></div>
+    <div class="particle" style="left:35%;--dur:11s;--delay:3.5s"></div>`
+    : `
+    <div class="particle" style="left:12%;--dur:7s;--delay:0s"></div>
+    <div class="particle" style="left:28%;--dur:9s;--delay:1.2s"></div>
+    <div class="particle" style="left:45%;--dur:6s;--delay:2.4s"></div>
+    <div class="particle" style="left:62%;--dur:10s;--delay:.5s"></div>
+    <div class="particle" style="left:78%;--dur:8.5s;--delay:.8s"></div>
+    <div class="particle" style="left:92%;--dur:7s;--delay:1s"></div>`;
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -27,6 +47,12 @@ function blockPageBase(opts) {
   .particle{position:absolute;width:4px;height:4px;border-radius:50%;background:var(--accent);opacity:0;animation:floatUp var(--dur,8s) var(--delay,0s) infinite ease-in}
   .particle:nth-child(even){background:var(--accent-2)}
   @keyframes floatUp{0%{opacity:0;transform:translateY(100vh) scale(.5)}10%{opacity:.5}90%{opacity:.3}100%{opacity:0;transform:translateY(-10vh) scale(1.2)}}
+  .announce{position:fixed;top:16px;left:50%;transform:translateX(-50%);z-index:3;display:flex;align-items:center;gap:12px;max-width:min(94vw,920px);padding:14px 22px;border-radius:24px;border:1px solid rgba(156,225,255,.45);background:linear-gradient(130deg,rgba(80,170,255,.22),rgba(0,188,188,.2) 38%,rgba(14,24,44,.84) 100%);backdrop-filter:blur(14px) saturate(135%);box-shadow:0 20px 44px rgba(0,0,0,.38),0 0 0 1px rgba(140,215,255,.2) inset,0 0 28px rgba(0,188,188,.16);animation:announcePop .7s cubic-bezier(.2,1.35,.5,1) .15s both}
+  @keyframes announcePop{0%{opacity:0;transform:translateX(-50%) translateY(-28px) scale(.92)}70%{opacity:1;transform:translateX(-50%) translateY(3px) scale(1.02)}100%{opacity:1;transform:translateX(-50%) translateY(0) scale(1)}}
+  .announce-dot{width:12px;height:12px;border-radius:50%;background:#9ff4ff;box-shadow:0 0 0 0 rgba(159,244,255,.6),0 0 14px rgba(159,244,255,.5);animation:announcePulse 1.7s infinite}
+  @keyframes announcePulse{0%{box-shadow:0 0 0 0 rgba(159,244,255,.6),0 0 14px rgba(159,244,255,.5)}70%{box-shadow:0 0 0 10px rgba(159,244,255,0),0 0 16px rgba(159,244,255,.2)}100%{box-shadow:0 0 0 0 rgba(159,244,255,0),0 0 14px rgba(159,244,255,.35)}}
+  .announce-text{font-size:.95rem;line-height:1.38;color:#ecf8ff;letter-spacing:.02em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .announce-text strong{color:#8cefff;font-weight:700}
   .bg-glow{position:fixed;width:28rem;height:28rem;border-radius:50%;filter:blur(90px);opacity:.15;pointer-events:none;z-index:0}
   .bg-glow.one{background:var(--accent);top:-8rem;left:-8rem;animation:glowPulse 6s ease-in-out infinite alternate}
   .bg-glow.two{background:var(--accent-2);right:-8rem;bottom:-10rem;animation:glowPulse 6s ease-in-out 3s infinite alternate}
@@ -48,17 +74,14 @@ function blockPageBase(opts) {
   .meta{margin-top:18px;color:#9fb0d0;font-size:.78rem;border-top:1px solid rgba(255,255,255,.08);padding-top:14px;display:flex;flex-wrap:wrap;gap:10px 18px;justify-content:center;animation:fadeIn .5s .9s both}
   .meta strong{color:#d7e3fb;font-weight:600}
   .powered{text-align:center;margin-top:14px;font-size:.72rem;color:rgba(167,180,211,.45);letter-spacing:.05em;animation:fadeIn .5s 1s both}
+  @media (max-width:640px){.announce{top:10px;padding:11px 14px;gap:9px;border-radius:18px}.announce-text{font-size:.85rem}}
   ${retryAfter > 0 ? `.retry-timer{margin-top:12px;font-size:.88rem;color:var(--accent-2);font-weight:600;animation:fadeIn .5s .65s both}` : ''}
 </style>
 </head>
 <body>
+  ${announcementText ? `<div class="announce" role="status" aria-live="polite"><span class="announce-dot"></span><span class="announce-text"><strong>Ryzeon Notice:</strong> ${clip(announcementText, 120)}</span></div>` : ''}
   <div class="particles">
-    <div class="particle" style="left:12%;--dur:7s;--delay:0s"></div>
-    <div class="particle" style="left:28%;--dur:9s;--delay:1.2s"></div>
-    <div class="particle" style="left:45%;--dur:6s;--delay:2.4s"></div>
-    <div class="particle" style="left:62%;--dur:10s;--delay:.5s"></div>
-    <div class="particle" style="left:78%;--dur:8.5s;--delay:.8s"></div>
-    <div class="particle" style="left:92%;--dur:7s;--delay:1s"></div>
+    ${particlesHtml}
   </div>
   <div class="bg-glow one"></div>
   <div class="bg-glow two"></div>
@@ -219,6 +242,8 @@ export function htmlServiceDown(host, rayId) {
     statusText: 'Service Down', retryAfter: 30,
     showContact: true,
     extraInfo: 'The server may be undergoing maintenance or experiencing temporary issues. Your request will be served once the service recovers.',
+    announcementText: 'Enhanced verification is live — fast, secure, and actively filtering abusive traffic.',
+    richParticles: true,
   });
 }
 
@@ -281,7 +306,7 @@ export function htmlChallenge(host, rayId, colo, utcTime, threatScore) {
   @keyframes dotPulse{0%,100%{opacity:1}50%{opacity:.4}}
   .warn{margin-top:14px;color:#e8eefc;font-size:.92rem;border-left:3px solid var(--accent-2);padding:8px 12px;border-radius:0 8px 8px 0;background:rgba(0,188,188,.06);animation:slideRight .5s ease .9s both}
   @keyframes slideRight{from{opacity:0;transform:translateX(-12px)}to{opacity:1;transform:translateX(0)}}
-  .meta{margin-top:18px;color:#9fb0d0;font-size:.8rem;border-top:1px solid rgba(255,255,255,.1);padding-top:14px;line-height:1.6;display:flex;flex-wrap:wrap;gap:12px 20px;animation:fadeIn .5s 1s both}
+  .meta{margin-top:18px;color:#9fb0d0;font-size:.8rem;border-top:1px solid rgba(255,255,255,.1);padding-top:14px;line-height:1.6;display:flex;flex-wrap:wrap;gap:12px 20px;justify-content:center;text-align:center;animation:fadeIn .5s 1s both}
   .meta-item{white-space:nowrap}
   .meta strong{color:#d7e3fb;font-weight:600}
   .powered{text-align:center;margin-top:16px;font-size:.72rem;color:rgba(167,180,211,.5);letter-spacing:.05em;animation:fadeIn .5s 1.1s both}

@@ -45,6 +45,10 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-
 const SIG_RE = /^[a-f0-9]{64}$/i;
 const CHALLENGE_MIN_TTL = 30;
 const CHALLENGE_MAX_TTL = 120;
+const SENSITIVE_AUTH_PATHS = new Set([
+  '/login', '/signin', '/auth', '/auth/login', '/api/token', '/oauth/token',
+  '/wp-login.php', '/xmlrpc.php', '/admin/login', '/user/login',
+]);
 
 function clamp(num, min, max) {
   return Math.max(min, Math.min(max, num));
@@ -112,8 +116,101 @@ function normalizeFpHash(value) {
   return FP_HASH_RE.test(candidate) ? candidate : '';
 }
 
+function isTrustedAsnOrg(asOrg, env) {
+  const org = String(asOrg || '').toLowerCase().trim();
+  if (!org) return false;
+  const trusted = String(env?.TRUSTED_ASN_ORGS || '')
+    .split(',')
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+  if (!trusted.length) return false;
+  return trusted.some((hint) => org.includes(hint));
+}
+
 function isHexSha256(value) {
   return /^[a-f0-9]{64}$/i.test(String(value || '').trim());
+}
+
+function isSensitiveAuthPath(pathLower) {
+  if (SENSITIVE_AUTH_PATHS.has(pathLower)) return true;
+  return (
+    pathLower.endsWith('/login')
+    || pathLower.includes('/auth/')
+    || pathLower.includes('/token')
+    || pathLower.includes('/signin')
+  );
+}
+
+async function kvIncrementTtl(env, key, ttlSeconds) {
+  if (!env?.SHIELD_KV) return 0;
+  try {
+    const safeTtl = Math.max(60, Number(ttlSeconds || 0));
+    const current = Number((await env.SHIELD_KV.get(key)) || '0');
+    const next = current + 1;
+    await env.SHIELD_KV.put(key, String(next), { expirationTtl: safeTtl });
+    return next;
+  } catch {
+    return 0;
+  }
+}
+
+async function checkTokenBucketBurst(env, ip, fpHash, nowMs) {
+  if (!env?.SHIELD_KV || !ip || ip === 'N/A') {
+    return { blocked: false, ipPerSec: 0, fpPerSec: 0 };
+  }
+  const secondBucket = Math.floor(nowMs / 1000);
+  const ipKey = `shield:tb:ip:${ip}:${secondBucket}`;
+  const fpKey = fpHash ? `shield:tb:fp:${fpHash}:${secondBucket}` : null;
+
+  const [ipPerSec, fpPerSec] = await Promise.all([
+    kvIncrementTtl(env, ipKey, 8),
+    fpKey ? kvIncrementTtl(env, fpKey, 8) : Promise.resolve(0),
+  ]);
+
+  const blocked = ipPerSec > 35 || fpPerSec > 45;
+  return { blocked, ipPerSec, fpPerSec };
+}
+
+async function trackAuthPressure(env, ip, fpHash, pathLower) {
+  if (!env?.SHIELD_KV || !isSensitiveAuthPath(pathLower)) {
+    return { active: false, hard: false, warn: false, ipCount: 0, fpCount: 0 };
+  }
+  const windowSlot = Math.floor(Date.now() / (5 * 60 * 1000));
+  const ipKey = `shield:auth:ip:${ip}:${pathLower}:${windowSlot}`;
+  const fpKey = fpHash ? `shield:auth:fp:${fpHash}:${pathLower}:${windowSlot}` : null;
+
+  const [ipCount, fpCount] = await Promise.all([
+    kvIncrementTtl(env, ipKey, 20 * 60),
+    fpKey ? kvIncrementTtl(env, fpKey, 20 * 60) : Promise.resolve(0),
+  ]);
+
+  const hard = ipCount >= 20 || fpCount >= 25;
+  const warn = ipCount >= 8 || fpCount >= 10;
+  return { active: true, hard, warn, ipCount, fpCount };
+}
+
+function powFailKey(ip, fpHash) {
+  return `shield:pow:fail:${ip}:${fpHash || 'nofp'}`;
+}
+
+async function getPowFailStreak(env, ip, fpHash) {
+  if (!env?.SHIELD_KV || !ip || ip === 'N/A') return 0;
+  const data = await kvGetJson(env, powFailKey(ip, fpHash));
+  return Number(data?.count || 0);
+}
+
+async function increasePowFailStreak(env, ip, fpHash) {
+  if (!env?.SHIELD_KV || !ip || ip === 'N/A') return 0;
+  const key = powFailKey(ip, fpHash);
+  const prev = (await kvGetJson(env, key)) || { count: 0, updatedAt: 0 };
+  const next = { count: Number(prev.count || 0) + 1, updatedAt: Date.now() };
+  await kvPutJson(env, key, next, 30 * 60);
+  return next.count;
+}
+
+async function clearPowFailStreak(env, ip, fpHash) {
+  if (!env?.SHIELD_KV || !ip || ip === 'N/A') return;
+  await env.SHIELD_KV.delete(powFailKey(ip, fpHash));
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -189,6 +286,7 @@ export default {
     const behaviorRisk = await loadBehaviorRisk(env, fpHash, asn, country);
     behaviorRisk._fpHash = fpHash;
     const ipReputation = await loadIpReputation(env, ip);
+    const trustedAsnOrg = isTrustedAsnOrg(asOrg, env);
     const signals = buildDetectionSignals(request, ip, nowMs, behaviorRisk);
     const {
       suspicious, headless, vpn: vpnProxy, aiCrawler,
@@ -222,7 +320,22 @@ export default {
       _fpSpam: fpSpam, _patternScore: patternScore,
       _baseThreatScore: baseThreatScore,
       _ipRepInfluence: ipRepInfluence,
+      _trustedAsnOrg: trustedAsnOrg,
     };
+
+    const tokenBucket = await checkTokenBucketBurst(env, ip, fpHash, nowMs);
+    baseDetails._ipPerSec = tokenBucket.ipPerSec;
+    baseDetails._fpPerSec = tokenBucket.fpPerSec;
+
+    if (tokenBucket.blocked && !isIpWhitelisted(ip, env)) {
+      const penalty = await escalateIpPenalty(env, ip, 'Token-bucket burst threshold exceeded', baseDetails);
+      applyPenaltyToDetails(baseDetails, penalty);
+      emitBlockLogs(ctx, env, 'RATE_LIMITED', 'Token-bucket burst threshold exceeded', baseDetails, signals, fpHash, ip, asn);
+      return new Response(htmlRateLimited(host, rayId), {
+        status: 429,
+        headers: securityHeaders(new Headers({ 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'retry-after': '45' })),
+      });
+    }
 
     const attackMemory = env?.SHIELD_KV ? await kvGetJson(env, `shield:attacks:ip:${ip}`) : null;
     if (attackMemory && Number(attackMemory.count || 0) >= 25 && (Date.now() - Number(attackMemory.last || 0)) < 24 * 3600 * 1000) {
@@ -270,6 +383,22 @@ export default {
         status: 403,
         headers: securityHeaders(new Headers({ 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })),
       });
+    }
+
+    const authPressure = await trackAuthPressure(env, ip, fpHash, pathLower);
+    if (authPressure.active) {
+      baseDetails._authPressureIp = authPressure.ipCount;
+      baseDetails._authPressureFp = authPressure.fpCount;
+      baseDetails._authPressureWarn = authPressure.warn;
+      if (authPressure.hard && !isIpWhitelisted(ip, env)) {
+        const penalty = await escalateIpPenalty(env, ip, `Bruteforce pressure on ${pathLower}`, baseDetails);
+        applyPenaltyToDetails(baseDetails, penalty);
+        emitBlockLogs(ctx, env, 'RATE_LIMITED', 'Bruteforce pressure detected on ' + pathLower, baseDetails, signals, fpHash, ip, asn);
+        return new Response(htmlRateLimited(host, rayId), {
+          status: 429,
+          headers: securityHeaders(new Headers({ 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'retry-after': '120' })),
+        });
+      }
     }
 
     // ── Fake responses for obvious bots/scrapers ──
@@ -343,7 +472,10 @@ export default {
       const reqCookies = parseCookies(request.headers.get('cookie'));
       const risk = Number(reqCookies[COOKIE_RISK_NAME] || 0);
       const dynamicDifficulty = Math.max(2, Math.min(7, POW_DIFFICULTY + (risk >= 85 ? 3 : risk >= 65 ? 2 : risk >= 40 ? 1 : 0)));
-      const challengeType = risk >= 75 ? 'pow-hard' : (risk >= 45 ? 'pow' : 'pow-lite');
+      const failStreak = await getPowFailStreak(env, ip, fpHash);
+      const streakBonus = failStreak >= 10 ? 3 : failStreak >= 6 ? 2 : failStreak >= 3 ? 1 : 0;
+      const adjustedDifficulty = clamp(dynamicDifficulty + streakBonus, 2, 7);
+      const challengeType = (risk >= 75 || failStreak >= 6) ? 'pow-hard' : (risk >= 45 || failStreak >= 3 ? 'pow' : 'pow-lite');
       const prefix = crypto.randomUUID();
       const challengeId = crypto.randomUUID();
       const challengeFp = normalizeFpHash(url.searchParams.get('fp') || request.headers.get('x-shield-fp'));
@@ -361,7 +493,7 @@ export default {
       if (env?.SHIELD_KV) {
         await kvPutJson(env, `shield:challenge:${challengeId}`, {
           challengeId, ip,
-          difficulty: dynamicDifficulty,
+          difficulty: adjustedDifficulty,
           challengeType,
           prefixHash,
           issuedAt,
@@ -373,12 +505,13 @@ export default {
 
       return new Response(JSON.stringify({
         prefix,
-        difficulty: dynamicDifficulty,
+        difficulty: adjustedDifficulty,
         challengeType,
         challengeId,
         challengeSig,
         issuedAt,
         expiresIn: ttlSeconds,
+        failStreak,
       }), {
         headers: securityHeaders(new Headers({ 'content-type': 'application/json', 'cache-control': 'no-store' })),
       });
@@ -625,6 +758,12 @@ export default {
           baseDetails._riskRejected = true;
         }
 
+        if (valid && vpnProxy && !trustedAsnOrg && !isIpWhitelisted(ip, env)) {
+          valid = false;
+          baseDetails._vpnRejected = true;
+          baseDetails._verifyFailCode = 'vpn_proxy_rejected';
+        }
+
         const lowRiskSoftPass = (
           !valid
           && challengeValidated
@@ -682,20 +821,26 @@ export default {
         const failCode = baseDetails._verifyFailCode
           || (baseDetails._challengeReplay ? 'challenge_replay_or_expired'
             : baseDetails._riskRejected ? 'risk_rejected'
+            : baseDetails._vpnRejected ? 'vpn_proxy_rejected'
             : baseDetails._behaviorRejected ? 'behavior_rejected'
             : baseDetails._verifyMalformed ? 'verify_malformed'
             : 'pow_unknown');
-        const failReason = 'PoW validation failed [' + failCode + ']';
+        const failReason = baseDetails._vpnRejected
+          ? 'VPN/Proxy verification denied [' + failCode + ']'
+          : 'PoW validation failed [' + failCode + ']';
+        const failEventType = baseDetails._vpnRejected ? 'VPN_BLOCKED' : 'FAILED';
+        const failStatKey = baseDetails._vpnRejected ? 'blocked' : 'failed';
         ctx.waitUntil(Promise.all([
-          sendDiscordWebhookDelayed(env, 'FAILED', failReason, baseDetails, 3000),
-          sendExternalLog(env, 'FAILED', 'PoW failed', baseDetails),
-          logToD1(env, 'FAILED', 'PoW failed', baseDetails),
-          incrementKvStat(env, 'failed'),
+          sendDiscordWebhookDelayed(env, failEventType, failReason, baseDetails, 3000),
+          sendExternalLog(env, failEventType, failReason, baseDetails),
+          logToD1(env, failEventType, failReason, baseDetails),
+          incrementKvStat(env, failStatKey),
           incrementKvStat(env, 'total'),
-          storeBehaviorProfile(env, { event: 'FAILED', fpHash: verifyFpHash || baseDetails.fpHash, ip, asn }),
-          trackAttackMemory(env, ip, 'FAILED', 'PoW/verify failed'),
+          storeBehaviorProfile(env, { event: failEventType, fpHash: verifyFpHash || baseDetails.fpHash, ip, asn }),
+          trackAttackMemory(env, ip, failEventType, failReason),
+          increasePowFailStreak(env, ip, verifyFpHash || baseDetails.fpHash),
         ]));
-        return new Response(JSON.stringify({ ok: false, error: 'Invalid proof-of-work' }), {
+        return new Response(JSON.stringify({ ok: false, error: baseDetails._vpnRejected ? 'VPN/Proxy denied' : 'Invalid proof-of-work' }), {
           status: 403,
           headers: securityHeaders(new Headers({ 'content-type': 'application/json', 'cache-control': 'no-store' })),
         });
@@ -720,6 +865,7 @@ export default {
         logToD1(env, 'PASSED', 'PoW verified', baseDetails),
         incrementKvStat(env, 'passed'),
         incrementKvStat(env, 'total'),
+        clearPowFailStreak(env, ip, safeFp),
       ]));
 
       return new Response(JSON.stringify({ ok: true }), { status: 200, headers });
@@ -875,7 +1021,7 @@ export default {
         if (escalation === 'block') {
           blockPage = htmlRateLimited(host, rayId);
         }
-      } else if (vpnProxy && threatScore >= 50) {
+      } else if (vpnProxy && !trustedAsnOrg && threatScore >= 50) {
         eventType = 'VPN_BLOCKED';
         reason = 'VPN/Proxy + high threat';
         if (escalation === 'block') {
@@ -927,6 +1073,18 @@ export default {
     ctx.waitUntil(incrementKvStat(env, 'total'));
     try {
       const response = await fetch(request);
+
+      if (response.status >= 500) {
+        ctx.waitUntil(Promise.all([
+          logErrorToD1(env, 'Origin responded with ' + response.status, 'upstream_5xx', baseDetails),
+          sendDiscordWebhook(env, 'ERROR', 'Origin returned ' + response.status + ' (maintenance fallback)', baseDetails),
+        ]));
+        return new Response(htmlServiceDown(host, rayId), {
+          status: 502,
+          headers: securityHeaders(new Headers({ 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })),
+        });
+      }
+
       const newHeaders = new Headers(response.headers);
       securityHeaders(newHeaders);
       return new Response(response.body, { status: response.status, statusText: response.statusText, headers: newHeaders });

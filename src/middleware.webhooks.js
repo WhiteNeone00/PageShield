@@ -149,6 +149,10 @@ async function getWebhookCooldownState(env, eventType, details) {
 // ─── Discord Webhook (APP-style embed) ───────────────────────────
 export async function sendDiscordWebhook(env, eventType, reason, details) {
   const eventLabel = String(eventType || 'EVENT').replace(/_/g, ' ');
+  const passedEnabled = String(env?.WEBHOOK_PASSED ?? '1').toLowerCase();
+  if (eventType === 'PASSED' && (passedEnabled === '0' || passedEnabled === 'false' || passedEnabled === 'off' || passedEnabled === 'no')) {
+    return false;
+  }
   const isDeployEvent = eventType === 'DEPLOYED' || eventType === 'SYSTEM_UPDATE';
   const webhookTargets = isDeployEvent
     ? [env?.DISCORD_WEBHOOK_URL_SYSTEM].filter(Boolean)
