@@ -436,7 +436,7 @@ export async function sendDiscordWebhook(env, eventType, reason, details) {
     const rowGap = '  ';
     const headerGap = '                 ';
     const rows = Math.max(leftLines.length, rightLines.length);
-    bottomLines.push(`${A.bCyan}Stats${A.reset}`.padEnd(leftWidth, ' ') + headerGap + `${A.bYellow}Penalty${A.reset}`);
+    bottomLines.push(`${A.bCyan}     Stats${A.reset}`.padEnd(leftWidth, ' ') + headerGap + `${A.bYellow}Penalty${A.reset}`);
     for (let i = 0; i < rows; i++) {
       const left = (leftLines[i] || '').padEnd(leftWidth, ' ');
       const right = rightLines[i] || '';
