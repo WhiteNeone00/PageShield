@@ -14,7 +14,21 @@ function renderServerDashboard(stats, safeHost) {
   const blocked24 = Number(stats?.kpi?.blocked24h || 0);
   const passed24 = Number(stats?.kpi?.passed24h || 0);
   const topIps = (Array.isArray(stats?.topIps) ? stats.topIps : []).slice(0, 8);
-  return `<div class="wrap" id="server-dashboard">
+  return `<div class="shell" id="server-dashboard-shell">
+    <aside class="sidebar">
+      <div class="side-title">Ryzeon Shield</div>
+      <div class="side-sub">Live Control Panel</div>
+      <div class="side-host">${safeHost}</div>
+      <nav class="side-nav">
+        <a href="#" class="active">Overview</a>
+        <a href="#">Threats</a>
+        <a href="#">Traffic</a>
+        <a href="#">Top IPs</a>
+      </nav>
+      <div class="side-foot">Session active</div>
+    </aside>
+    <main class="main">
+  <div class="wrap" id="server-dashboard">
     <div class="top"><div><div class="title">Ryzeon Shield Live Dashboard</div><div class="muted">Host: ${safeHost} • Session active</div></div><div><button id="refreshBtn" class="btn">Refresh</button> <button id="logoutBtn" class="btn">Logout</button></div></div>
     <div class="grid">
       <section class="card kpi"><div class="sub">Live requests/sec</div><div class="val">${reqps}</div><div class="sub">Last minute total: ${reqpm}</div></section>
@@ -23,6 +37,8 @@ function renderServerDashboard(stats, safeHost) {
       <section class="card kpi"><div class="sub">Top IPs</div><div class="sub">${topIps.length}</div></section>
       <section class="card full"><div class="sub">Top Attacking IPs</div><div class="list" style="margin-top:8px">${topIps.length ? topIps.map(r => `<div class="row"><span>${escapeHtml(r.ip || 'N/A')}</span><span>${Number(r.count || 0)} hits</span></div>`).join('') : '<div class="muted">No recent attack data.</div>'}</div></section>
     </div>
+  </div>
+  </main>
   </div>`;
 }
 
@@ -40,7 +56,17 @@ export function htmlShieldStats(host, initialStats = null) {
     :root{--bg:#070f1e;--bg2:#0d1a34;--card:rgba(17,27,47,.86);--line:rgba(255,255,255,.08);--txt:#e9f1ff;--muted:#9fb0d0;--a:#56a0ff;--b:#00bcbc;--ok:#2ecc71;--bad:#ff6b6b}
     *{box-sizing:border-box}
     body{margin:0;min-height:100vh;background:radial-gradient(circle at 10% 10%,rgba(86,160,255,.2),transparent 36%),radial-gradient(circle at 85% 90%,rgba(0,188,188,.2),transparent 34%),linear-gradient(160deg,var(--bg),var(--bg2));font-family:Inter,Segoe UI,Arial,sans-serif;color:var(--txt)}
-    .wrap{max-width:1200px;margin:0 auto;padding:20px}
+    .shell{display:grid;grid-template-columns:260px 1fr;min-height:100vh}
+    .sidebar{border-right:1px solid var(--line);background:rgba(10,18,34,.78);backdrop-filter:blur(10px);padding:18px 14px;position:sticky;top:0;height:100vh}
+    .side-title{font-weight:800;font-size:1.05rem;letter-spacing:.2px}
+    .side-sub{font-size:.82rem;color:var(--muted);margin-top:4px}
+    .side-host{margin-top:14px;font-size:.78rem;color:#c8d6f4;word-break:break-all;background:rgba(255,255,255,.04);padding:8px;border-radius:8px;border:1px solid var(--line)}
+    .side-nav{margin-top:14px;display:grid;gap:8px}
+    .side-nav a{display:block;text-decoration:none;color:#dbe7ff;background:rgba(255,255,255,.03);border:1px solid transparent;padding:9px 10px;border-radius:9px;font-size:.9rem}
+    .side-nav a.active,.side-nav a:hover{border-color:rgba(86,160,255,.45);background:rgba(86,160,255,.12)}
+    .side-foot{position:absolute;left:14px;right:14px;bottom:16px;font-size:.78rem;color:var(--muted)}
+    .main{min-width:0}
+    .wrap{max-width:1280px;margin:0 auto;padding:20px}
     .top{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:14px}
     .title{font-size:1.2rem;font-weight:700}
     .muted{color:var(--muted)}
@@ -65,6 +91,7 @@ export function htmlShieldStats(host, initialStats = null) {
     .input:focus{border-color:rgba(86,160,255,.6)}
     .err{color:var(--bad);font-size:.84rem;min-height:1.1rem;margin-top:8px}
     canvas{width:100%;height:280px}
+    @media (max-width:1080px){.shell{grid-template-columns:1fr}.sidebar{position:relative;height:auto;border-right:none;border-bottom:1px solid var(--line)}.side-foot{position:static;margin-top:10px}}
     @media (max-width:980px){.kpi{grid-column:span 6}.wide{grid-column:span 12}}
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
@@ -223,7 +250,15 @@ export function htmlShieldStats(host, initialStats = null) {
     const topCountries = (stats.countries || []).slice(0, 8);
     const countryMax = Math.max(1, ...topCountries.map(x => Number(x.count || 0)));
 
-    app.innerHTML = '<div class="wrap">'
+    app.innerHTML = '<div class="shell">'
+      + '<aside class="sidebar">'
+      + '<div class="side-title">Ryzeon Shield</div>'
+      + '<div class="side-sub">Live Control Panel</div>'
+      + '<div class="side-host">' + SAFE_HOST + '</div>'
+      + '<nav class="side-nav"><a href="#" class="active">Overview</a><a href="#">Threats</a><a href="#">Traffic</a><a href="#">Top IPs</a></nav>'
+      + '<div class="side-foot">Realtime security telemetry</div>'
+      + '</aside>'
+      + '<main class="main"><div class="wrap">'
       + '<div class="top"><div><div class="title">Ryzeon Shield Live Dashboard</div><div class="muted">Host: ' + SAFE_HOST + ' • Auto-refresh every 5s</div></div><div><button id="refreshBtn" class="btn">Refresh</button> <button id="logoutBtn" class="btn">Logout</button></div></div>'
       + '<div class="grid">'
       + '<section class="card kpi"><div class="sub">Live requests/sec</div><div class="val">' + reqps.toFixed(2) + '</div><div class="sub">Last minute total: ' + reqpm + '</div></section>'
@@ -246,7 +281,7 @@ export function htmlShieldStats(host, initialStats = null) {
       + '<section class="card full"><div class="sub">Top Attacking IPs</div><div class="list" style="margin-top:8px">'
       + (topIps.length ? topIps.map(r => '<div class="row"><span>' + esc(r.ip || 'N/A') + '</span><span>' + Number(r.count || 0) + ' hits</span></div>').join('') : '<div class="muted">No recent attack data.</div>')
       + '</div></section>'
-      + '</div></div>';
+      + '</div></div></main></div>';
 
     document.getElementById('refreshBtn').onclick = renderDashboard;
     document.getElementById('logoutBtn').onclick = async () => {
