@@ -40,6 +40,29 @@ export function isVpnProxy(request) {
   return LISTS.vpn_asn_hints.some((h) => org.includes(h));
 }
 
+function isLikelyDatacenterAutomation(request) {
+  const org = String(request.cf?.asOrganization || '').toLowerCase();
+  if (!org) return false;
+
+  const dcHints = [
+    'skyway west', 'digitalocean', 'linode', 'hetzner', 'ovh', 'contabo', 'leaseweb',
+    'choopa', 'vultr', 'hivelocity', 'amazon', 'aws', 'google cloud', 'microsoft',
+    'azure', 'oracle cloud', 'alibaba cloud', 'tencent cloud', 'data center', 'colo',
+  ];
+  const isDcAsn = dcHints.some((hint) => org.includes(hint));
+  if (!isDcAsn) return false;
+
+  const ua = String(request.headers.get('user-agent') || '').toLowerCase();
+  const hasBrowserUa = /\b(mozilla|chrome|safari|firefox|edg|opera)\b/.test(ua);
+  const hasSecFetchMode = !!request.headers.get('sec-fetch-mode');
+  const hasSecChUa = !!request.headers.get('sec-ch-ua');
+  const hasAcceptLang = !!request.headers.get('accept-language');
+
+  if (!hasBrowserUa) return true;
+  if (!hasSecFetchMode || !hasSecChUa || !hasAcceptLang) return true;
+  return false;
+}
+
 export function isAiCrawler(request) {
   const ua = (request.headers.get('user-agent') || '').toLowerCase();
   return LISTS.ai_crawler_patterns.some((p) => ua.includes(p));
@@ -182,9 +205,10 @@ export function classifyClientType(request, signals) {
 export function buildDetectionSignals(request, ip, nowMs, behaviorRisk = {}) {
   const url = new URL(request.url);
   const headerPresenceScore = getHeaderPresenceScore(request);
-  const suspicious = isSuspicious(request);
+  const datacenterAutomation = isLikelyDatacenterAutomation(request);
+  const suspicious = isSuspicious(request) || datacenterAutomation;
   const headless = isHeadless(request);
-  const vpn = isVpnProxy(request);
+  const vpn = isVpnProxy(request) || datacenterAutomation;
   const aiCrawler = isAiCrawler(request);
   const spam = isSpam(ip, nowMs);
   const hardBlocked = isHardBlocked(ip, nowMs);

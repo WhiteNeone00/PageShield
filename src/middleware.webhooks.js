@@ -249,8 +249,9 @@ export async function sendDiscordWebhook(env, eventType, reason, details) {
   const meta = eventMeta(eventType);
   const isBad = ['BLOCKED', 'HARD_BLOCKED', 'HONEYPOT', 'FAILED', 'ATTACK', 'SUSPENDED', 'BOT_FARM', 'HONEYPOT_FORM'].includes(eventType);
   const isGood = eventType === 'PASSED';
+  const isError = eventType === 'ERROR';
   const flags = triggerFlags(details);
-  const statusBadge = isDeployEvent ? '🟢 LIVE' : isGood ? '🟢 ALLOWED' : isBad ? '🔴 BLOCKED' : '🟡 CHALLENGED';
+  const statusBadge = isDeployEvent ? '🟢 LIVE' : isError ? '🟠 ERROR' : isGood ? '🟢 ALLOWED' : isBad ? '🔴 BLOCKED' : '🟡 CHALLENGED';
   const displayReason = compactWebhookReason(reason);
 
   // Count how many detections triggered

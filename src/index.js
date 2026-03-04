@@ -50,6 +50,8 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-
 const SIG_RE = /^[a-f0-9]{64}$/i;
 const CHALLENGE_MIN_TTL = 30;
 const CHALLENGE_MAX_TTL = 120;
+const COOKIE_RECHECK_NAME = 'cf_shield_recheck';
+const VERIFIED_RECHECK_COOLDOWN = 300;
 
 const SENSITIVE_AUTH_PATHS = new Set([
   '/login', '/signin', '/auth', '/auth/login', '/api/token', '/oauth/token',
@@ -395,13 +397,16 @@ export default {
       headers.append('set-cookie', COOKIE_SIG_NAME + '=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax');
       headers.append('set-cookie', COOKIE_FP_NAME + '=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax');
       headers.append('set-cookie', COOKIE_RISK_NAME + '=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax');
+      headers.append('set-cookie', COOKIE_RECHECK_NAME + '=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax');
       return headers;
     };
     const verifiedFlag = cookies[COOKIE_NAME] === '1';
     const cookieExp = Number(cookies[COOKIE_EXP_NAME] || 0);
     const cookieSig = cookies[COOKIE_SIG_NAME] || '';
     const cookieFp = String(cookies[COOKIE_FP_NAME] || '');
-    const isExpired = cookieExp > 0 && Math.floor(nowMs / 1000) > cookieExp;
+    const recheckUntil = Number(cookies[COOKIE_RECHECK_NAME] || 0);
+    const nowSec = Math.floor(nowMs / 1000);
+    const isExpired = cookieExp > 0 && nowSec > cookieExp;
     let verified = false;
     if (verifiedFlag && !isExpired && cookieSig && cookieFp) {
       const secret = getSigningSecret(env);
@@ -1097,6 +1102,7 @@ export default {
       headers.append('set-cookie', COOKIE_EXP_NAME + '=' + exp + '; Path=/; Max-Age=' + COOKIE_MAX_AGE + '; HttpOnly; Secure; SameSite=Lax');
       headers.append('set-cookie', COOKIE_SIG_NAME + '=' + sig + '; Path=/; Max-Age=' + COOKIE_MAX_AGE + '; HttpOnly; Secure; SameSite=Lax');
       headers.append('set-cookie', COOKIE_FP_NAME + '=' + safeFp + '; Path=/; Max-Age=' + COOKIE_MAX_AGE + '; HttpOnly; Secure; SameSite=Lax');
+      headers.append('set-cookie', COOKIE_RECHECK_NAME + '=' + String(Math.floor(Date.now() / 1000) + VERIFIED_RECHECK_COOLDOWN) + '; Path=/; Max-Age=' + VERIFIED_RECHECK_COOLDOWN + '; HttpOnly; Secure; SameSite=Lax');
 
       ctx.waitUntil(storeBehaviorProfile(env, { event: 'PASSED', fpHash: safeFp, ip, asn, country }));
       ctx.waitUntil(Promise.all([
@@ -1216,7 +1222,16 @@ export default {
     // ── Challenge Escalation Decision (reuse pre-computed value) ──
     const escalation = baseDetails._escalation;
 
-    if (!verified) {
+    const verifiedHighRisk = verified && (
+      headless
+      || (runtimePolicy.ddosBlockEnabled && ddosSuspect)
+      || (runtimePolicy.rateLimitEnabled && (spam || fpSpam))
+      || (runtimePolicy.aiCrawlerBlockEnabled && aiCrawler)
+      || (suspicious && threatScore >= 60)
+    );
+    const needsRiskRecheck = verifiedHighRisk && (!Number.isFinite(recheckUntil) || recheckUntil <= nowSec);
+
+    if (!verified || needsRiskRecheck) {
       if ((method === 'GET' || method === 'HEAD') && !url.pathname.startsWith('/__')) {
         try {
           // Multi-tenant origin probe
@@ -1262,7 +1277,7 @@ export default {
 
       // Determine specific reason and serve appropriate page
       let eventType = 'CHALLENGED';
-      let reason = 'Challenge gate (first visit)';
+      let reason = verified ? 'Risk recheck required' : 'Challenge gate (first visit)';
       let blockPage = null;
 
       if (isExpired) {
