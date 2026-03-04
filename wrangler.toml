@@ -8,7 +8,6 @@ version_metadata = { binding = "SHIELD_VERSION_METADATA" }
 # Route coverage:
 # - Protect all on ryzeon.wtf/*
 # - Protect all on *.ryzeon.wtf/*
-# - In code: eu-api.ryzeon.wtf only protects "/"
 routes = [
   { pattern = "ryzeon.wtf/*", zone_name = "ryzeon.wtf" },
   { pattern = "*.ryzeon.wtf/*", zone_name = "ryzeon.wtf" }
@@ -29,3 +28,7 @@ database_id = "99a8605d-8b63-4a71-bb90-5d94a232d7b5"
 [[r2_buckets]]
 binding = "SHIELD_R2"
 bucket_name = "shield-storage"
+
+[vars]
+IP_WHITELIST_EXTRA = ""
+ADMIN_PASSWORD = "admin999"

@@ -47,12 +47,12 @@ function blockPageBase(opts) {
   .particle{position:absolute;width:4px;height:4px;border-radius:50%;background:var(--accent);opacity:0;animation:floatUp var(--dur,8s) var(--delay,0s) infinite ease-in}
   .particle:nth-child(even){background:var(--accent-2)}
   @keyframes floatUp{0%{opacity:0;transform:translateY(100vh) scale(.5)}10%{opacity:.5}90%{opacity:.3}100%{opacity:0;transform:translateY(-10vh) scale(1.2)}}
-  .announce{position:fixed;top:16px;left:50%;transform:translateX(-50%);z-index:3;display:flex;align-items:center;gap:12px;max-width:min(94vw,920px);padding:14px 22px;border-radius:24px;border:1px solid rgba(156,225,255,.45);background:linear-gradient(130deg,rgba(80,170,255,.22),rgba(0,188,188,.2) 38%,rgba(14,24,44,.84) 100%);backdrop-filter:blur(14px) saturate(135%);box-shadow:0 20px 44px rgba(0,0,0,.38),0 0 0 1px rgba(140,215,255,.2) inset,0 0 28px rgba(0,188,188,.16);animation:announcePop .7s cubic-bezier(.2,1.35,.5,1) .15s both}
+  .announce{position:fixed;top:16px;left:50%;transform:translateX(-50%);z-index:3;display:flex;align-items:center;gap:12px;max-width:min(94vw,920px);padding:14px 22px;border-radius:24px;border:1px solid color-mix(in srgb,var(--accent) 48%,#dff3ff 18%);background:linear-gradient(130deg,color-mix(in srgb,var(--accent) 26%,transparent),color-mix(in srgb,var(--accent-2) 22%,transparent) 38%,rgba(14,24,44,.84) 100%);backdrop-filter:blur(14px) saturate(135%);box-shadow:0 20px 44px rgba(0,0,0,.38),0 0 0 1px color-mix(in srgb,var(--accent) 34%,transparent) inset,0 0 28px color-mix(in srgb,var(--accent-2) 25%,transparent);animation:announcePop .7s cubic-bezier(.2,1.35,.5,1) .15s both}
   @keyframes announcePop{0%{opacity:0;transform:translateX(-50%) translateY(-28px) scale(.92)}70%{opacity:1;transform:translateX(-50%) translateY(3px) scale(1.02)}100%{opacity:1;transform:translateX(-50%) translateY(0) scale(1)}}
-  .announce-dot{width:12px;height:12px;border-radius:50%;background:#9ff4ff;box-shadow:0 0 0 0 rgba(159,244,255,.6),0 0 14px rgba(159,244,255,.5);animation:announcePulse 1.7s infinite}
-  @keyframes announcePulse{0%{box-shadow:0 0 0 0 rgba(159,244,255,.6),0 0 14px rgba(159,244,255,.5)}70%{box-shadow:0 0 0 10px rgba(159,244,255,0),0 0 16px rgba(159,244,255,.2)}100%{box-shadow:0 0 0 0 rgba(159,244,255,0),0 0 14px rgba(159,244,255,.35)}}
+  .announce-dot{width:12px;height:12px;border-radius:50%;background:var(--accent-2);box-shadow:0 0 0 0 color-mix(in srgb,var(--accent-2) 55%,transparent),0 0 14px color-mix(in srgb,var(--accent-2) 50%,transparent);animation:announcePulse 1.7s infinite}
+  @keyframes announcePulse{0%{box-shadow:0 0 0 0 color-mix(in srgb,var(--accent-2) 55%,transparent),0 0 14px color-mix(in srgb,var(--accent-2) 50%,transparent)}70%{box-shadow:0 0 0 10px rgba(0,0,0,0),0 0 16px color-mix(in srgb,var(--accent-2) 26%,transparent)}100%{box-shadow:0 0 0 0 rgba(0,0,0,0),0 0 14px color-mix(in srgb,var(--accent-2) 38%,transparent)}}
   .announce-text{font-size:.95rem;line-height:1.38;color:#ecf8ff;letter-spacing:.02em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-  .announce-text strong{color:#8cefff;font-weight:700}
+  .announce-text strong{color:var(--accent-2);font-weight:700}
   .bg-glow{position:fixed;width:28rem;height:28rem;border-radius:50%;filter:blur(90px);opacity:.15;pointer-events:none;z-index:0}
   .bg-glow.one{background:var(--accent);top:-8rem;left:-8rem;animation:glowPulse 6s ease-in-out infinite alternate}
   .bg-glow.two{background:var(--accent-2);right:-8rem;bottom:-10rem;animation:glowPulse 6s ease-in-out 3s infinite alternate}
@@ -123,6 +123,7 @@ export function htmlRateLimited(host, rayId) {
     icon: '\u26A1', accentColor: '#e67e22', secondaryColor: '#f39c12',
     statusText: 'Rate Limited', retryAfter: 60,
     extraInfo: 'Your request rate has exceeded the allowed limit. This restriction is temporary and will be lifted automatically.',
+    announcementText: 'Traffic shaping is active — excessive request bursts are temporarily delayed to protect service stability.',
   });
 }
 
@@ -149,6 +150,7 @@ export function htmlSuspended(host, rayId, reason) {
     icon: '\uD83D\uDEAB', accentColor: '#992d22', secondaryColor: '#c0392b',
     statusText: 'Suspended',
     extraInfo: 'Your IP address has been penalized due to repeated malicious activity. If this suspension is permanent, contact the site administrator.',
+    announcementText: 'Security enforcement is active — this access path is currently restricted due to policy violations.',
   });
 }
 
@@ -242,7 +244,7 @@ export function htmlServiceDown(host, rayId) {
     statusText: 'Service Down', retryAfter: 30,
     showContact: true,
     extraInfo: 'The server may be undergoing maintenance or experiencing temporary issues. Your request will be served once the service recovers.',
-    announcementText: 'Enhanced verification is live — fast, secure, and actively filtering abusive traffic.',
+    announcementText: 'Service health monitoring is active — origin is currently unavailable and traffic is safely queued behind edge protection.',
     richParticles: true,
   });
 }

@@ -53,7 +53,10 @@ export function isCountryBlocked(request, env) {
 }
 
 export function isIpWhitelisted(ip, env) {
-  const list = (env?.IP_WHITELIST || '').split(',').map((s) => s.trim()).filter(Boolean);
+  const list = [
+    ...(env?.IP_WHITELIST || '').split(','),
+    ...(env?.IP_WHITELIST_EXTRA || '').split(','),
+  ].map((s) => s.trim()).filter(Boolean);
   return list.includes(ip);
 }
 
@@ -374,8 +377,6 @@ export function determineEscalation(threatScore, signals) {
 // ─── Route Protection ────────────────────────────────────────────
 export function shouldProtect(url) {
   const host = url.hostname.toLowerCase();
-  const path = url.pathname;
-  if (host === 'eu-api.ryzeon.wtf') return path === '/' || path === '';
   if (host === 'ryzeon.wtf') return true;
   if (host.endsWith('.ryzeon.wtf')) return true;
   return false;

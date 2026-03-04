@@ -16,6 +16,24 @@ import {
   setDynamicBlacklist,
 } from './engine.blacklist.js';
 
+const WHITELIST_EXTRA_KEY = 'shield:whitelist:extra';
+
+function normalizeIpSet(values) {
+  return [...new Set((values || []).map((value) => normalizeIp(value)).filter(Boolean))];
+}
+
+async function readWhitelistExtraIps(env) {
+  if (!env?.SHIELD_KV) return [];
+  const raw = await env.SHIELD_KV.get(WHITELIST_EXTRA_KEY, 'json');
+  return normalizeIpSet(parseIpListPayload(raw));
+}
+
+async function writeWhitelistExtraIps(env, ips) {
+  if (!env?.SHIELD_KV) return;
+  const normalized = normalizeIpSet(ips);
+  await env.SHIELD_KV.put(WHITELIST_EXTRA_KEY, JSON.stringify(normalized), { expirationTtl: 3650 * 24 * 3600 });
+}
+
 // ─── Stats API ───────────────────────────────────────────────────
 export async function handleStatsApi(env) {
   const day = new Date().toISOString().slice(0, 10);
@@ -181,6 +199,120 @@ export async function handleBlacklistUpdate(env, request) {
     ok: true,
     count: dynamicIpBlacklist.size,
     message: 'Blacklist updated',
+  }, null, 2), {
+    headers: securityHeaders(new Headers({ 'content-type': 'application/json', 'cache-control': 'no-store' })),
+  });
+}
+
+// ─── Unblacklist / Clear Penalty API ────────────────────────────
+export async function handleUnblacklist(env, request, requesterIp = '') {
+  let payload = {};
+  try {
+    payload = await request.json();
+  } catch {}
+
+  const targetIp = normalizeIp(payload?.ip || requesterIp);
+  if (!targetIp) {
+    return new Response(JSON.stringify({ ok: false, error: 'No valid target IP provided' }), {
+      status: 400,
+      headers: securityHeaders(new Headers({ 'content-type': 'application/json', 'cache-control': 'no-store' })),
+    });
+  }
+
+  const result = {
+    targetIp,
+    penaltyCleared: false,
+    attackMemoryCleared: false,
+    powFailKeysCleared: 0,
+    remoteBlacklistRemoved: false,
+  };
+
+  if (env?.SHIELD_KV) {
+    const penaltyKey = `shield:penalty:ip:${targetIp}`;
+    const attackKey = `shield:attacks:ip:${targetIp}`;
+
+    try {
+      const existed = await env.SHIELD_KV.get(penaltyKey);
+      await env.SHIELD_KV.delete(penaltyKey);
+      result.penaltyCleared = existed !== null;
+    } catch {}
+
+    try {
+      const existed = await env.SHIELD_KV.get(attackKey);
+      await env.SHIELD_KV.delete(attackKey);
+      result.attackMemoryCleared = existed !== null;
+    } catch {}
+
+    try {
+      let cursor;
+      do {
+        const listed = await env.SHIELD_KV.list({ prefix: `shield:pow:fail:${targetIp}:`, cursor, limit: 1000 });
+        for (const key of (listed.keys || [])) {
+          await env.SHIELD_KV.delete(key.name);
+          result.powFailKeysCleared += 1;
+        }
+        cursor = listed.list_complete ? undefined : listed.cursor;
+      } while (cursor);
+    } catch {}
+
+    try {
+      const remoteRaw = await env.SHIELD_KV.get('remote:blacklisted_ips', 'json');
+      const remoteIps = parseIpListPayload(remoteRaw).map((value) => normalizeIp(value)).filter(Boolean);
+      const filtered = remoteIps.filter((value) => value !== targetIp);
+      if (filtered.length !== remoteIps.length) {
+        await env.SHIELD_KV.put('remote:blacklisted_ips', JSON.stringify(filtered), { expirationTtl: LIST_CACHE_TTL * 24 });
+        result.remoteBlacklistRemoved = true;
+      }
+    } catch {}
+  }
+
+  return new Response(JSON.stringify({ ok: true, ...result }, null, 2), {
+    headers: securityHeaders(new Headers({ 'content-type': 'application/json', 'cache-control': 'no-store' })),
+  });
+}
+
+// ─── Runtime Extra Whitelist API ───────────────────────────────
+export async function handleWhitelistExtraView(env) {
+  const ips = await readWhitelistExtraIps(env);
+  return new Response(JSON.stringify({ ok: true, count: ips.length, ips }, null, 2), {
+    headers: securityHeaders(new Headers({ 'content-type': 'application/json', 'cache-control': 'no-store' })),
+  });
+}
+
+export async function handleWhitelistExtraUpdate(env, request) {
+  let payload = {};
+  try {
+    payload = await request.json();
+  } catch {}
+
+  const action = String(payload?.action || 'set').toLowerCase();
+  const incomingIps = normalizeIpSet(parseIpListPayload(payload?.ips || payload?.ip || payload));
+  const currentIps = await readWhitelistExtraIps(env);
+  let nextIps = currentIps;
+
+  if (action === 'set') {
+    nextIps = incomingIps;
+  } else if (action === 'add') {
+    nextIps = normalizeIpSet([...currentIps, ...incomingIps]);
+  } else if (action === 'remove') {
+    const removeSet = new Set(incomingIps);
+    nextIps = currentIps.filter((ip) => !removeSet.has(ip));
+  } else if (action === 'clear') {
+    nextIps = [];
+  } else {
+    return new Response(JSON.stringify({ ok: false, error: 'Invalid action. Use set, add, remove, or clear.' }), {
+      status: 400,
+      headers: securityHeaders(new Headers({ 'content-type': 'application/json', 'cache-control': 'no-store' })),
+    });
+  }
+
+  await writeWhitelistExtraIps(env, nextIps);
+
+  return new Response(JSON.stringify({
+    ok: true,
+    action,
+    count: nextIps.length,
+    ips: nextIps,
   }, null, 2), {
     headers: securityHeaders(new Headers({ 'content-type': 'application/json', 'cache-control': 'no-store' })),
   });

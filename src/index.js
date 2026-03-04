@@ -35,16 +35,30 @@ import {
   htmlDdosBlocked, htmlAiCrawlerBlocked, htmlBotDetected,
   htmlAttackBlocked, htmlHoneypotTriggered, htmlServiceDown,
 } from './views.challenge.js';
+import { htmlShieldStats } from './views.dashboard.js';
 import {
   handleStatsApi, handleListReload, handleBlacklistReload,
   handleBlacklistView, handleBlacklistUpdate, handleListUpdate, handleListView,
+  handleUnblacklist, handleWhitelistExtraView, handleWhitelistExtraUpdate,
 } from './middleware.api.js';
+import { handleAdminRoutes, resolveDashboardSession } from './admin.routes.js';
 
 const FP_HASH_RE = /^[a-f0-9]{64}$/;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const SIG_RE = /^[a-f0-9]{64}$/i;
 const CHALLENGE_MIN_TTL = 30;
 const CHALLENGE_MAX_TTL = 120;
+const POLICY_DEFAULTS = {
+  protectEnabled: true,
+  rateLimitEnabled: true,
+  attackBlockEnabled: true,
+  honeypotEnabled: true,
+  aiCrawlerBlockEnabled: true,
+  ddosBlockEnabled: true,
+  vpnBlockEnabled: true,
+  extraHoneypotPaths: [],
+  extraVpnHints: [],
+};
 const SENSITIVE_AUTH_PATHS = new Set([
   '/login', '/signin', '/auth', '/auth/login', '/api/token', '/oauth/token',
   '/wp-login.php', '/xmlrpc.php', '/admin/login', '/user/login',
@@ -213,6 +227,27 @@ async function clearPowFailStreak(env, ip, fpHash) {
   await env.SHIELD_KV.delete(powFailKey(ip, fpHash));
 }
 
+async function loadRuntimePolicy(env) {
+  if (!env?.SHIELD_KV) return { ...POLICY_DEFAULTS };
+  try {
+    const raw = await env.SHIELD_KV.get('shield:config:policy', 'json');
+    const data = raw && typeof raw === 'object' ? raw : {};
+    return {
+      protectEnabled: data.protectEnabled !== false,
+      rateLimitEnabled: data.rateLimitEnabled !== false,
+      attackBlockEnabled: data.attackBlockEnabled !== false,
+      honeypotEnabled: data.honeypotEnabled !== false,
+      aiCrawlerBlockEnabled: data.aiCrawlerBlockEnabled !== false,
+      ddosBlockEnabled: data.ddosBlockEnabled !== false,
+      vpnBlockEnabled: data.vpnBlockEnabled !== false,
+      extraHoneypotPaths: Array.isArray(data.extraHoneypotPaths) ? data.extraHoneypotPaths.map((x) => String(x || '').toLowerCase().trim()).filter(Boolean) : [],
+      extraVpnHints: Array.isArray(data.extraVpnHints) ? data.extraVpnHints.map((x) => String(x || '').toLowerCase().trim()).filter(Boolean) : [],
+    };
+  } catch {
+    return { ...POLICY_DEFAULTS };
+  }
+}
+
 // ═══════════════════════════════════════════════════════════════════
 //  Helper: emit block logs (reduces repetition)
 // ═══════════════════════════════════════════════════════════════════
@@ -260,6 +295,23 @@ export default {
     const method = request.method || 'N/A';
     const pathLower = url.pathname.toLowerCase();
 
+    let runtimeWhitelistExtra = '';
+    if (env?.SHIELD_KV) {
+      try {
+        const runtimeIps = await env.SHIELD_KV.get('shield:whitelist:extra', 'json');
+        const parsed = Array.isArray(runtimeIps) ? runtimeIps : [];
+        runtimeWhitelistExtra = parsed
+          .map((value) => String(value || '').trim())
+          .filter(Boolean)
+          .join(',');
+      } catch {}
+    }
+    const mergedWhitelistEnv = {
+      ...env,
+      IP_WHITELIST_EXTRA: [String(env?.IP_WHITELIST_EXTRA || '').trim(), runtimeWhitelistExtra].filter(Boolean).join(','),
+    };
+    const isWhitelistedIp = (candidateIp) => isIpWhitelisted(candidateIp, mergedWhitelistEnv);
+
     const publicAssetPaths = new Set(['/logo.webp', '/logo.png', '/logo.jpg', '/favicon.ico']);
     if ((method === 'GET' || method === 'HEAD') && publicAssetPaths.has(pathLower)) {
       const assetResponse = await fetch(request);
@@ -272,6 +324,24 @@ export default {
         headers: assetHeaders,
       });
     }
+
+    if (method === 'GET' && (pathLower === '/shield-stats' || pathLower === '/shield-stats/')) {
+      const dashboardSession = await resolveDashboardSession(request, env);
+      return new Response(htmlShieldStats(host, dashboardSession.ok ? dashboardSession.stats : null), {
+        status: 200,
+        headers: securityHeaders(new Headers({
+          'content-type': 'text/html; charset=utf-8',
+          'cache-control': 'no-store',
+        })),
+      });
+    }
+
+    const adminResponse = await handleAdminRoutes(request, env, ip);
+    if (adminResponse) {
+      return adminResponse;
+    }
+
+    const runtimePolicy = await loadRuntimePolicy(env);
 
     const referer = request.headers.get('referer') || 'N/A';
     const acceptLanguage = request.headers.get('accept-language') || 'N/A';
@@ -295,6 +365,7 @@ export default {
       isBotFarm, countryAnomaly, tlsScore, tlsSignals,
       fpSpam, fpHardBlocked, patternScore, identicalPathBurst, paramEnumeration,
     } = signals;
+    const runtimeVpnProxy = vpnProxy || runtimePolicy.extraVpnHints.some((hint) => String(asOrg || '').toLowerCase().includes(hint));
     const baseThreatScore = computeThreatScore(request, signals);
     const ipRepInfluence = clamp(Number(ipReputation.score || 0), 0, 100);
     const threatScore = clamp(
@@ -309,7 +380,7 @@ export default {
       rayId, country, asOrg, asn, colo, utcTime,
       tlsVersion, httpVersion, threatScore, fpHash,
       _suspicious: suspicious, _headless: headless,
-      _vpn: vpnProxy, _aiCrawler: aiCrawler,
+      _vpn: runtimeVpnProxy, _aiCrawler: aiCrawler,
       _ddosSuspect: ddosSuspect, _clientType: clientType,
       _headerPresenceScore: headerPresenceScore,
       _ipRate: ipRate, _prefixRate: prefixRate, _ipPrefix: ipPrefix,
@@ -323,11 +394,40 @@ export default {
       _trustedAsnOrg: trustedAsnOrg,
     };
 
+    const proxyWithMaintenanceFallback = async (req, contextLabel = 'origin_proxy') => {
+      try {
+        const response = await fetch(req);
+        if (response.status >= 500) {
+          ctx.waitUntil(Promise.all([
+            logErrorToD1(env, 'Origin responded with ' + response.status, `${contextLabel}_upstream_5xx`, baseDetails),
+            sendDiscordWebhook(env, 'ERROR', 'Origin returned ' + response.status + ' (maintenance fallback)', baseDetails),
+          ]));
+          return new Response(htmlServiceDown(host, rayId), {
+            status: 502,
+            headers: securityHeaders(new Headers({ 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })),
+          });
+        }
+
+        const newHeaders = new Headers(response.headers);
+        securityHeaders(newHeaders);
+        return new Response(response.body, { status: response.status, statusText: response.statusText, headers: newHeaders });
+      } catch (err) {
+        ctx.waitUntil(Promise.all([
+          logErrorToD1(env, 'Origin fetch failed: ' + err.message, err.stack, baseDetails),
+          sendDiscordWebhook(env, 'ERROR', 'Origin fetch failed: ' + err.message, baseDetails),
+        ]));
+        return new Response(htmlServiceDown(host, rayId), {
+          status: 502,
+          headers: securityHeaders(new Headers({ 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })),
+        });
+      }
+    };
+
     const tokenBucket = await checkTokenBucketBurst(env, ip, fpHash, nowMs);
     baseDetails._ipPerSec = tokenBucket.ipPerSec;
     baseDetails._fpPerSec = tokenBucket.fpPerSec;
 
-    if (tokenBucket.blocked && !isIpWhitelisted(ip, env)) {
+    if (runtimePolicy.rateLimitEnabled && tokenBucket.blocked && !isWhitelistedIp(ip)) {
       const penalty = await escalateIpPenalty(env, ip, 'Token-bucket burst threshold exceeded', baseDetails);
       applyPenaltyToDetails(baseDetails, penalty);
       emitBlockLogs(ctx, env, 'RATE_LIMITED', 'Token-bucket burst threshold exceeded', baseDetails, signals, fpHash, ip, asn);
@@ -351,7 +451,7 @@ export default {
     ctx.waitUntil(emitDeploymentEventIfNeeded(env, baseDetails));
 
     // ── Attack pattern hard block ──
-    if (attackFlags.length > 0) {
+    if (runtimePolicy.attackBlockEnabled && attackFlags.length > 0) {
       const penalty = await escalateIpPenalty(env, ip, 'Attack signature: ' + attackFlags.join(','), baseDetails);
       applyPenaltyToDetails(baseDetails, penalty);
       emitBlockLogs(ctx, env, 'ATTACK', 'Attack detected: ' + attackFlags.join(', '), baseDetails, signals, fpHash, ip, asn);
@@ -363,7 +463,10 @@ export default {
 
     // ── Smart honeypot endpoints (instant permanent ban) ──
     const instantBanHoneypots = new Set(['/admin-test', '/internal-admin', '/.git/config', '/wp-admin.php', '/.env', '/debug', '/wp-login.php', '/phpmyadmin', '/admin/config', '/.aws/credentials', '/server-status']);
-    if (instantBanHoneypots.has(pathLower)) {
+    for (const extraPath of runtimePolicy.extraHoneypotPaths) {
+      if (String(extraPath || '').startsWith('/')) instantBanHoneypots.add(String(extraPath));
+    }
+    if (runtimePolicy.honeypotEnabled && instantBanHoneypots.has(pathLower)) {
       const penalty = await setPermanentPenalty(env, ip, 'Instant honeypot endpoint: ' + pathLower, baseDetails);
       applyPenaltyToDetails(baseDetails, penalty);
       emitBlockLogs(ctx, env, 'HONEYPOT', 'Instant-ban honeypot triggered: ' + pathLower, baseDetails, signals, fpHash, ip, asn);
@@ -374,8 +477,10 @@ export default {
     }
 
     // ── Honeypot trap from LISTS ──
-    const honeypotPaths = LISTS.honeypot_paths;
-    if (honeypotPaths.some(p => pathLower === p || pathLower.startsWith(p + '/'))) {
+    const honeypotPaths = runtimePolicy.honeypotEnabled
+      ? [...new Set([...(LISTS.honeypot_paths || []), ...(runtimePolicy.extraHoneypotPaths || [])])]
+      : [];
+    if (runtimePolicy.honeypotEnabled && honeypotPaths.some(p => pathLower === p || pathLower.startsWith(p + '/'))) {
       const penalty = await escalateIpPenalty(env, ip, 'Honeypot path: ' + url.pathname, baseDetails);
       applyPenaltyToDetails(baseDetails, penalty);
       emitBlockLogs(ctx, env, 'HONEYPOT', 'Honeypot triggered: ' + url.pathname, baseDetails, signals, fpHash, ip, asn);
@@ -390,7 +495,7 @@ export default {
       baseDetails._authPressureIp = authPressure.ipCount;
       baseDetails._authPressureFp = authPressure.fpCount;
       baseDetails._authPressureWarn = authPressure.warn;
-      if (authPressure.hard && !isIpWhitelisted(ip, env)) {
+      if (runtimePolicy.rateLimitEnabled && authPressure.hard && !isWhitelistedIp(ip)) {
         const penalty = await escalateIpPenalty(env, ip, `Bruteforce pressure on ${pathLower}`, baseDetails);
         applyPenaltyToDetails(baseDetails, penalty);
         emitBlockLogs(ctx, env, 'RATE_LIMITED', 'Bruteforce pressure detected on ' + pathLower, baseDetails, signals, fpHash, ip, asn);
@@ -466,6 +571,16 @@ export default {
       if (apiKey && request.headers.get('authorization') !== 'Bearer ' + apiKey) return new Response('Unauthorized', { status: 401, headers: securityHeaders(new Headers()) });
       return handleListView();
     }
+
+    // Unblacklist / Clear Penalty
+    if (apiAuth('/__shield/unblacklist', 'POST') === true) return handleUnblacklist(env, request, ip);
+    if (apiAuth('/__shield/unblacklist', 'POST') === 'unauthorized') return new Response('Unauthorized', { status: 401, headers: securityHeaders(new Headers()) });
+
+    // Runtime Extra Whitelist (KV-backed)
+    if (apiAuth('/__shield/whitelist-extra', 'GET') === true) return handleWhitelistExtraView(env);
+    if (apiAuth('/__shield/whitelist-extra', 'GET') === 'unauthorized') return new Response('Unauthorized', { status: 401, headers: securityHeaders(new Headers()) });
+    if (apiAuth('/__shield/whitelist-extra', 'POST') === true) return handleWhitelistExtraUpdate(env, request);
+    if (apiAuth('/__shield/whitelist-extra', 'POST') === 'unauthorized') return new Response('Unauthorized', { status: 401, headers: securityHeaders(new Headers()) });
 
     // ── PoW Challenge endpoint ──
     if (url.pathname === '/__challenge' && method === 'GET') {
@@ -593,7 +708,7 @@ export default {
         honeypotResult = scoreHoneypot(honeypot);
 
         // If honeypot form fields are filled → instant ban
-        if (honeypotResult.honeypotTriggered) {
+        if (runtimePolicy.honeypotEnabled && honeypotResult.honeypotTriggered) {
           const penalty = await setPermanentPenalty(env, ip, 'Honeypot form field filled', baseDetails);
           applyPenaltyToDetails(baseDetails, penalty);
           ctx.waitUntil(Promise.all([
@@ -758,7 +873,7 @@ export default {
           baseDetails._riskRejected = true;
         }
 
-        if (valid && vpnProxy && !trustedAsnOrg && !isIpWhitelisted(ip, env)) {
+        if (valid && runtimePolicy.vpnBlockEnabled && runtimeVpnProxy && !trustedAsnOrg && !isWhitelistedIp(ip)) {
           valid = false;
           baseDetails._vpnRejected = true;
           baseDetails._verifyFailCode = 'vpn_proxy_rejected';
@@ -872,13 +987,13 @@ export default {
     }
 
     // ── Skip protection for unprotected routes ──
-    if (!shouldProtect(url)) {
-      return fetch(request);
+    if (!runtimePolicy.protectEnabled || !shouldProtect(url)) {
+      return proxyWithMaintenanceFallback(request, 'unprotected_origin_proxy');
     }
 
     // ── IP Whitelist bypass ──
-    if (isIpWhitelisted(ip, env)) {
-      return fetch(request);
+    if (isWhitelistedIp(ip)) {
+      return proxyWithMaintenanceFallback(request, 'whitelist_origin_proxy');
     }
 
     // ── IP Reputation auto-block ──
@@ -916,7 +1031,7 @@ export default {
     }
 
     // ── AI crawler hard block ──
-    if (aiCrawler && !isIpWhitelisted(ip, env)) {
+    if (runtimePolicy.aiCrawlerBlockEnabled && aiCrawler && !isWhitelistedIp(ip)) {
       const penalty = await escalateIpPenalty(env, ip, 'AI crawler blocked', baseDetails);
       applyPenaltyToDetails(baseDetails, penalty);
       emitBlockLogs(ctx, env, 'AI_CRAWLER', 'AI crawler blocked: ' + ua.slice(0, 80), baseDetails, signals, fpHash, ip, asn);
@@ -938,7 +1053,7 @@ export default {
     }
 
     // ── Hard rate-limit block ──
-    if (hardBlocked || fpHardBlocked) {
+    if (runtimePolicy.rateLimitEnabled && (hardBlocked || fpHardBlocked)) {
       const penalty = await escalateIpPenalty(env, ip, 'Rate limit exceeded' + (fpHardBlocked ? ' (fingerprint)' : ''), baseDetails);
       applyPenaltyToDetails(baseDetails, penalty);
       emitBlockLogs(ctx, env, 'RATE_LIMITED', 'Rate limit exceeded', baseDetails, signals, fpHash, ip, asn);
@@ -949,7 +1064,7 @@ export default {
     }
 
     // ── DDoS anomaly hard block ──
-    if (ddosSuspect && threatScore >= 85) {
+    if (runtimePolicy.ddosBlockEnabled && ddosSuspect && threatScore >= 85) {
       const penalty = await escalateIpPenalty(env, ip, 'DDoS anomaly detected', baseDetails);
       applyPenaltyToDetails(baseDetails, penalty);
       baseDetails._preventedBytes = estimatePreventedBytes(request, signals);
@@ -988,7 +1103,36 @@ export default {
     // ── Challenge Escalation Decision ──
     const escalation = determineEscalation(threatScore, signals);
 
-    if (!verified || suspicious || headless || spam || fpSpam || aiCrawler || ddosSuspect) {
+    if (!verified || suspicious || headless || (runtimePolicy.rateLimitEnabled && (spam || fpSpam)) || (runtimePolicy.aiCrawlerBlockEnabled && aiCrawler) || (runtimePolicy.ddosBlockEnabled && ddosSuspect)) {
+      if ((method === 'GET' || method === 'HEAD') && !url.pathname.startsWith('/__')) {
+        try {
+          let probe = await fetch(new Request(request, { method: 'HEAD' }));
+          if (probe.status === 405) {
+            probe = await fetch(request);
+          }
+
+          if (probe.status >= 500) {
+            ctx.waitUntil(Promise.all([
+              logErrorToD1(env, 'Origin responded with ' + probe.status, 'pre_challenge_upstream_5xx', baseDetails),
+              sendDiscordWebhook(env, 'ERROR', 'Origin returned ' + probe.status + ' (pre-challenge maintenance fallback)', baseDetails),
+            ]));
+            return new Response(htmlServiceDown(host, rayId), {
+              status: 502,
+              headers: securityHeaders(new Headers({ 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })),
+            });
+          }
+        } catch (probeErr) {
+          ctx.waitUntil(Promise.all([
+            logErrorToD1(env, 'Origin pre-challenge probe failed: ' + probeErr.message, probeErr.stack, baseDetails),
+            sendDiscordWebhook(env, 'ERROR', 'Origin pre-challenge probe failed: ' + probeErr.message, baseDetails),
+          ]));
+          return new Response(htmlServiceDown(host, rayId), {
+            status: 502,
+            headers: securityHeaders(new Headers({ 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })),
+          });
+        }
+      }
+
       // Determine specific reason and serve appropriate page
       let eventType = 'CHALLENGED';
       let reason = 'Challenge gate (first visit)';
@@ -1015,13 +1159,13 @@ export default {
         if (escalation === 'block') {
           blockPage = htmlBotDetected(host, rayId);
         }
-      } else if (spam || fpSpam) {
+      } else if (runtimePolicy.rateLimitEnabled && (spam || fpSpam)) {
         eventType = 'RATE_LIMITED';
         reason = 'Rate limited' + (fpSpam ? ' (fingerprint)' : '');
         if (escalation === 'block') {
           blockPage = htmlRateLimited(host, rayId);
         }
-      } else if (vpnProxy && !trustedAsnOrg && threatScore >= 50) {
+      } else if (runtimePolicy.vpnBlockEnabled && runtimeVpnProxy && !trustedAsnOrg && threatScore >= 50) {
         eventType = 'VPN_BLOCKED';
         reason = 'VPN/Proxy + high threat';
         if (escalation === 'block') {
@@ -1071,33 +1215,7 @@ export default {
 
     // ── Passed — proxy to origin ──
     ctx.waitUntil(incrementKvStat(env, 'total'));
-    try {
-      const response = await fetch(request);
-
-      if (response.status >= 500) {
-        ctx.waitUntil(Promise.all([
-          logErrorToD1(env, 'Origin responded with ' + response.status, 'upstream_5xx', baseDetails),
-          sendDiscordWebhook(env, 'ERROR', 'Origin returned ' + response.status + ' (maintenance fallback)', baseDetails),
-        ]));
-        return new Response(htmlServiceDown(host, rayId), {
-          status: 502,
-          headers: securityHeaders(new Headers({ 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })),
-        });
-      }
-
-      const newHeaders = new Headers(response.headers);
-      securityHeaders(newHeaders);
-      return new Response(response.body, { status: response.status, statusText: response.statusText, headers: newHeaders });
-    } catch (err) {
-      ctx.waitUntil(Promise.all([
-        logErrorToD1(env, 'Origin fetch failed: ' + err.message, err.stack, baseDetails),
-        sendDiscordWebhook(env, 'ERROR', 'Origin fetch failed: ' + err.message, baseDetails),
-      ]));
-      return new Response(htmlServiceDown(host, rayId), {
-        status: 502,
-        headers: securityHeaders(new Headers({ 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })),
-      });
-    }
+    return proxyWithMaintenanceFallback(request, 'passed_origin_proxy');
    } catch (fatalErr) {
     const minDetails = {
       ip: request.headers.get('cf-connecting-ip') || 'N/A',
