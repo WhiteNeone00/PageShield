@@ -370,6 +370,15 @@ export function determineEscalation(threatScore, signals) {
 export async function shouldProtect(env, url) {
   const host = url.hostname.toLowerCase();
 
+  // 0) Explicit unprotected host/domain bypass (comma-separated)
+  const unprotectedDomains = (env?.UNPROTECTED_DOMAINS || '')
+    .split(',')
+    .map((d) => d.trim().toLowerCase())
+    .filter(Boolean);
+  for (const d of unprotectedDomains) {
+    if (host === d || host.endsWith('.' + d)) return false;
+  }
+
   // 1) Check env-configured protected domains (comma-separated)
   const envDomains = (env?.PROTECTED_DOMAINS || '').split(',').map(d => d.trim().toLowerCase()).filter(Boolean);
   for (const d of envDomains) {
@@ -387,5 +396,6 @@ export async function shouldProtect(env, url) {
     } catch { /* DB error — fall through */ }
   }
 
-  return false;
+  // 3) Default: if request reached this Worker route, protect it.
+  return true;
 }

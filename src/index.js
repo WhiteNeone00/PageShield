@@ -1216,7 +1216,7 @@ export default {
     // ── Challenge Escalation Decision (reuse pre-computed value) ──
     const escalation = baseDetails._escalation;
 
-    if (!verified || suspicious || headless || (runtimePolicy.rateLimitEnabled && (spam || fpSpam)) || (runtimePolicy.aiCrawlerBlockEnabled && aiCrawler) || (runtimePolicy.ddosBlockEnabled && ddosSuspect)) {
+    if (!verified) {
       if ((method === 'GET' || method === 'HEAD') && !url.pathname.startsWith('/__')) {
         try {
           // Multi-tenant origin probe

@@ -10,7 +10,7 @@ version_metadata = { binding = "SHIELD_VERSION_METADATA" }
 # - Protect all on *.ryzeon.wtf/*
 routes = [
   { pattern = "ryzeon.wtf/*", zone_name = "ryzeon.wtf" },
-  { pattern = "*.ryzeon.wtf/*", zone_name = "ryzeon.wtf" }
+  { pattern = "*.ryzeon.wtf/*", zone_name = "ryzeon.wtf" },
 ]
 
 # ── KV namespace for analytics counters ──
