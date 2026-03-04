@@ -20,10 +20,12 @@ function renderServerDashboard(stats, safeHost) {
       <div class="side-sub">Live Control Panel</div>
       <div class="side-host">${safeHost}</div>
       <nav class="side-nav">
-        <a href="#" class="active">Overview</a>
-        <a href="#">Threats</a>
-        <a href="#">Traffic</a>
-        <a href="#">Top IPs</a>
+        <button class="tab-btn active" data-tab="overview">Overview</button>
+        <button class="tab-btn" data-tab="threats">Threats</button>
+        <button class="tab-btn" data-tab="traffic">Traffic</button>
+        <button class="tab-btn" data-tab="topips">Top IPs</button>
+        <button class="tab-btn" data-tab="profile">Profile</button>
+        <button class="tab-btn" data-tab="settings">Settings</button>
       </nav>
       <div class="side-foot">Session active</div>
     </aside>
@@ -62,8 +64,8 @@ export function htmlShieldStats(host, initialStats = null) {
     .side-sub{font-size:.82rem;color:var(--muted);margin-top:4px}
     .side-host{margin-top:14px;font-size:.78rem;color:#c8d6f4;word-break:break-all;background:rgba(255,255,255,.04);padding:8px;border-radius:8px;border:1px solid var(--line)}
     .side-nav{margin-top:14px;display:grid;gap:8px}
-    .side-nav a{display:block;text-decoration:none;color:#dbe7ff;background:rgba(255,255,255,.03);border:1px solid transparent;padding:9px 10px;border-radius:9px;font-size:.9rem}
-    .side-nav a.active,.side-nav a:hover{border-color:rgba(86,160,255,.45);background:rgba(86,160,255,.12)}
+    .tab-btn{display:block;width:100%;text-align:left;text-decoration:none;color:#dbe7ff;background:rgba(255,255,255,.03);border:1px solid transparent;padding:9px 10px;border-radius:9px;font-size:.9rem;cursor:pointer;transition:all .18s ease}
+    .tab-btn.active,.tab-btn:hover{border-color:rgba(86,160,255,.45);background:rgba(86,160,255,.12);transform:translateX(2px)}
     .side-foot{position:absolute;left:14px;right:14px;bottom:16px;font-size:.78rem;color:var(--muted)}
     .main{min-width:0}
     .wrap{max-width:1280px;margin:0 auto;padding:20px}
@@ -90,6 +92,15 @@ export function htmlShieldStats(host, initialStats = null) {
     .input{width:100%;padding:11px 12px;border-radius:10px;border:1px solid rgba(255,255,255,.14);background:rgba(0,0,0,.25);color:var(--txt);outline:none}
     .input:focus{border-color:rgba(86,160,255,.6)}
     .err{color:var(--bad);font-size:.84rem;min-height:1.1rem;margin-top:8px}
+    .chip{display:inline-flex;align-items:center;gap:6px;padding:4px 10px;border-radius:999px;font-size:.75rem;border:1px solid var(--line);background:rgba(255,255,255,.04)}
+    .tab-content{animation:fadeTab .2s ease}
+    @keyframes fadeTab{from{opacity:.45;transform:translateY(4px)}to{opacity:1;transform:translateY(0)}}
+    .mini-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
+    .mini{padding:10px;border-radius:10px;border:1px solid var(--line);background:rgba(255,255,255,.03)}
+    .mini .k{font-size:.76rem;color:var(--muted)}
+    .mini .v{font-size:1.05rem;font-weight:700;margin-top:4px}
+    .switch{display:flex;justify-content:space-between;align-items:center;padding:10px;border-radius:10px;border:1px solid var(--line);background:rgba(255,255,255,.03)}
+    .switch input{accent-color:#56a0ff}
     canvas{width:100%;height:280px}
     @media (max-width:1080px){.shell{grid-template-columns:1fr}.sidebar{position:relative;height:auto;border-right:none;border-bottom:1px solid var(--line)}.side-foot{position:static;margin-top:10px}}
     @media (max-width:980px){.kpi{grid-column:span 6}.wide{grid-column:span 12}}
@@ -118,6 +129,7 @@ export function htmlShieldStats(host, initialStats = null) {
   const TOKEN_KEY = 'shield_admin_jwt';
   const app = document.getElementById('app');
   let chart = null;
+  let activeTab = 'overview';
 
   function renderFatal(message){
     if(!app) return;
@@ -228,10 +240,95 @@ export function htmlShieldStats(host, initialStats = null) {
     });
   }
 
-  async function renderDashboard(){
+  function bindSidebar(){
+    const btns = app.querySelectorAll('.tab-btn[data-tab]');
+    btns.forEach((btn) => {
+      btn.addEventListener('click', () => {
+        activeTab = String(btn.getAttribute('data-tab') || 'overview');
+        renderDashboard();
+      });
+    });
+  }
+
+  function tabOverview(stats, topCountries, countryMax, topIps, reqps, reqpm, blocked24, passed24, ratio){
+    return '<div class="grid tab-content">'
+      + '<section class="card kpi"><div class="sub">Live requests/sec</div><div class="val">' + reqps.toFixed(2) + '</div><div class="sub">Last minute total: ' + reqpm + '</div></section>'
+      + '<section class="card kpi"><div class="sub">Blocked (24h)</div><div class="val" style="color:var(--bad)">' + blocked24 + '</div><div class="sub">Threat ratio: ' + ratio + '%</div></section>'
+      + '<section class="card kpi"><div class="sub">Passed (24h)</div><div class="val" style="color:var(--ok)">' + passed24 + '</div><div class="sub">Shield version: ' + esc(stats.version || 'v3') + '</div></section>'
+      + '<section class="card kpi"><div class="sub">Unique attacking IPs</div><div class="val">' + Number(stats.kpi?.uniqueAttackIps24h || 0) + '</div><div class="sub">Countries active: ' + Number(stats.kpi?.activeCountries24h || 0) + '</div></section>'
+      + '<section class="card wide"><div class="sub">Threat Heatmap (blocked per hour)</div>' + buildHeatmap(stats.heatmap || []) + '</section>'
+      + '<section class="card wide"><div class="sub">Country Map (Top Countries)</div><div class="list" style="margin-top:8px">'
+      + topCountries.map(c => {
+          const v = Number(c.count || 0);
+          const p = Math.max(4, Math.round((v / countryMax) * 100));
+          return '<div><div class="row"><span>' + flag(c.country) + ' ' + esc(c.country || 'N/A') + '</span><span>' + v + '</span></div><div class="bar"><span style="width:' + p + '%"></span></div></div>';
+        }).join('')
+      + '</div></section>'
+      + '<section class="card full"><div class="sub">Blocked vs Passed (24h)</div><div style="height:300px;margin-top:8px"><canvas id="bpChart"></canvas></div></section>'
+      + '<section class="card full"><div class="sub">Top Attacking IPs</div><div class="list" style="margin-top:8px">'
+      + (topIps.length ? topIps.map(r => '<div class="row"><span>' + esc(r.ip || 'N/A') + '</span><span>' + Number(r.count || 0) + ' hits</span></div>').join('') : '<div class="muted">No recent attack data.</div>')
+      + '</div></section>'
+      + '</div>';
+  }
+
+  function tabThreats(stats){
+    return '<div class="grid tab-content">'
+      + '<section class="card full"><div class="sub">Threat Intelligence Snapshot</div><div class="mini-grid" style="margin-top:10px">'
+      + '<div class="mini"><div class="k">Blocked 24h</div><div class="v" style="color:var(--bad)">' + Number(stats.kpi?.blocked24h || 0) + '</div></div>'
+      + '<div class="mini"><div class="k">Unique Attack IPs</div><div class="v">' + Number(stats.kpi?.uniqueAttackIps24h || 0) + '</div></div>'
+      + '<div class="mini"><div class="k">Active Countries</div><div class="v">' + Number(stats.kpi?.activeCountries24h || 0) + '</div></div>'
+      + '</div></section>'
+      + '<section class="card full"><div class="sub">Heatmap</div>' + buildHeatmap(stats.heatmap || []) + '</section>'
+      + '</div>';
+  }
+
+  function tabTraffic(stats){
+    const h = stats.hourly || [];
+    const passed = h.reduce((a,b)=>a+Number(b.passed||0),0);
+    const blocked = h.reduce((a,b)=>a+Number(b.blocked||0),0);
+    return '<div class="grid tab-content">'
+      + '<section class="card full"><div class="sub">Traffic Summary (24h)</div><div class="mini-grid" style="margin-top:10px">'
+      + '<div class="mini"><div class="k">Total Passed</div><div class="v" style="color:var(--ok)">' + passed + '</div></div>'
+      + '<div class="mini"><div class="k">Total Blocked</div><div class="v" style="color:var(--bad)">' + blocked + '</div></div>'
+      + '<div class="mini"><div class="k">Current RPS</div><div class="v">' + Number(stats.live?.requestsPerSecond || 0).toFixed(2) + '</div></div>'
+      + '</div></section>'
+      + '<section class="card full"><div class="sub">Blocked vs Passed (24h)</div><div style="height:300px;margin-top:8px"><canvas id="bpChart"></canvas></div></section>'
+      + '</div>';
+  }
+
+  function tabTopIps(topIps){
+    return '<div class="grid tab-content">'
+      + '<section class="card full"><div class="sub">Top Attacking IPs</div><div class="list" style="margin-top:10px">'
+      + (topIps.length ? topIps.map((r, i) => '<div class="row"><span>#' + (i+1) + ' ' + esc(r.ip || 'N/A') + '</span><span><span class="chip">' + Number(r.count || 0) + ' hits</span></span></div>').join('') : '<div class="muted">No recent attack data.</div>')
+      + '</div></section>'
+      + '</div>';
+  }
+
+  function tabProfile(){
+    const ua = navigator.userAgent || 'Unknown';
+    return '<div class="grid tab-content">'
+      + '<section class="card full"><div class="sub">Admin Profile</div><div class="mini-grid" style="margin-top:10px">'
+      + '<div class="mini"><div class="k">Role</div><div class="v">Shield Admin</div></div>'
+      + '<div class="mini"><div class="k">Session</div><div class="v">Active</div></div>'
+      + '<div class="mini"><div class="k">Host</div><div class="v">' + SAFE_HOST + '</div></div>'
+      + '</div><div class="sub" style="margin-top:10px">User Agent</div><div class="mini" style="margin-top:6px"><div class="k">Client</div><div class="v" style="font-size:.86rem;line-height:1.4">' + esc(ua) + '</div></div></section>'
+      + '</div>';
+  }
+
+  function tabSettings(){
+    return '<div class="grid tab-content">'
+      + '<section class="card full"><div class="sub">UI Settings</div><div class="list" style="margin-top:10px">'
+      + '<label class="switch"><span>Smooth animations</span><input type="checkbox" checked disabled/></label>'
+      + '<label class="switch"><span>Realtime refresh (5s)</span><input type="checkbox" checked disabled/></label>'
+      + '<label class="switch"><span>Compact mode</span><input type="checkbox" disabled/></label>'
+      + '</div><div class="sub" style="margin-top:10px">Operational controls are available via admin APIs.</div></section>'
+      + '</div>';
+  }
+
+  async function renderDashboard(seedStats){
     let stats;
     try {
-      stats = await api('/__shield/admin/dashboard');
+      stats = seedStats || await api('/__shield/admin/dashboard');
     } catch (e) {
       if (e.status === 401) {
         clearToken();
@@ -250,38 +347,36 @@ export function htmlShieldStats(host, initialStats = null) {
     const topCountries = (stats.countries || []).slice(0, 8);
     const countryMax = Math.max(1, ...topCountries.map(x => Number(x.count || 0)));
 
+    let tabHtml = '';
+    if (activeTab === 'overview') tabHtml = tabOverview(stats, topCountries, countryMax, topIps, reqps, reqpm, blocked24, passed24, ratio);
+    else if (activeTab === 'threats') tabHtml = tabThreats(stats);
+    else if (activeTab === 'traffic') tabHtml = tabTraffic(stats);
+    else if (activeTab === 'topips') tabHtml = tabTopIps(topIps);
+    else if (activeTab === 'profile') tabHtml = tabProfile();
+    else if (activeTab === 'settings') tabHtml = tabSettings();
+    else tabHtml = tabOverview(stats, topCountries, countryMax, topIps, reqps, reqpm, blocked24, passed24, ratio);
+
     app.innerHTML = '<div class="shell">'
       + '<aside class="sidebar">'
       + '<div class="side-title">Ryzeon Shield</div>'
       + '<div class="side-sub">Live Control Panel</div>'
       + '<div class="side-host">' + SAFE_HOST + '</div>'
-      + '<nav class="side-nav"><a href="#" class="active">Overview</a><a href="#">Threats</a><a href="#">Traffic</a><a href="#">Top IPs</a></nav>'
+      + '<nav class="side-nav">'
+      + '<button class="tab-btn' + (activeTab === 'overview' ? ' active' : '') + '" data-tab="overview">Overview</button>'
+      + '<button class="tab-btn' + (activeTab === 'threats' ? ' active' : '') + '" data-tab="threats">Threats</button>'
+      + '<button class="tab-btn' + (activeTab === 'traffic' ? ' active' : '') + '" data-tab="traffic">Traffic</button>'
+      + '<button class="tab-btn' + (activeTab === 'topips' ? ' active' : '') + '" data-tab="topips">Top IPs</button>'
+      + '<button class="tab-btn' + (activeTab === 'profile' ? ' active' : '') + '" data-tab="profile">Profile</button>'
+      + '<button class="tab-btn' + (activeTab === 'settings' ? ' active' : '') + '" data-tab="settings">Settings</button>'
+      + '</nav>'
       + '<div class="side-foot">Realtime security telemetry</div>'
       + '</aside>'
       + '<main class="main"><div class="wrap">'
       + '<div class="top"><div><div class="title">Ryzeon Shield Live Dashboard</div><div class="muted">Host: ' + SAFE_HOST + ' • Auto-refresh every 5s</div></div><div><button id="refreshBtn" class="btn">Refresh</button> <button id="logoutBtn" class="btn">Logout</button></div></div>'
-      + '<div class="grid">'
-      + '<section class="card kpi"><div class="sub">Live requests/sec</div><div class="val">' + reqps.toFixed(2) + '</div><div class="sub">Last minute total: ' + reqpm + '</div></section>'
-      + '<section class="card kpi"><div class="sub">Blocked (24h)</div><div class="val" style="color:var(--bad)">' + blocked24 + '</div><div class="sub">Threat ratio: ' + ratio + '%</div></section>'
-      + '<section class="card kpi"><div class="sub">Passed (24h)</div><div class="val" style="color:var(--ok)">' + passed24 + '</div><div class="sub">Shield version: ' + esc(stats.version || 'v3') + '</div></section>'
-      + '<section class="card kpi"><div class="sub">Unique attacking IPs</div><div class="val">' + Number(stats.kpi?.uniqueAttackIps24h || 0) + '</div><div class="sub">Countries active: ' + Number(stats.kpi?.activeCountries24h || 0) + '</div></section>'
+      + tabHtml
+      + '</div></main></div>';
 
-      + '<section class="card wide"><div class="sub">Threat Heatmap (blocked per hour)</div>' + buildHeatmap(stats.heatmap || []) + '</section>'
-
-      + '<section class="card wide"><div class="sub">Country Map (Top Countries)</div><div class="list" style="margin-top:8px">'
-      + topCountries.map(c => {
-          const v = Number(c.count || 0);
-          const p = Math.max(4, Math.round((v / countryMax) * 100));
-          return '<div><div class="row"><span>' + flag(c.country) + ' ' + esc(c.country || 'N/A') + '</span><span>' + v + '</span></div><div class="bar"><span style="width:' + p + '%"></span></div></div>';
-        }).join('')
-      + '</div></section>'
-
-      + '<section class="card full"><div class="sub">Blocked vs Passed (24h)</div><div style="height:300px;margin-top:8px"><canvas id="bpChart"></canvas></div></section>'
-
-      + '<section class="card full"><div class="sub">Top Attacking IPs</div><div class="list" style="margin-top:8px">'
-      + (topIps.length ? topIps.map(r => '<div class="row"><span>' + esc(r.ip || 'N/A') + '</span><span>' + Number(r.count || 0) + ' hits</span></div>').join('') : '<div class="muted">No recent attack data.</div>')
-      + '</div></section>'
-      + '</div></div></main></div>';
+    bindSidebar();
 
     document.getElementById('refreshBtn').onclick = renderDashboard;
     document.getElementById('logoutBtn').onclick = async () => {
@@ -289,20 +384,16 @@ export function htmlShieldStats(host, initialStats = null) {
       clearToken();
       renderLogin();
     };
-    renderLine(stats);
+    if (document.getElementById('bpChart')) {
+      renderLine(stats);
+    } else if (chart) {
+      chart.destroy();
+      chart = null;
+    }
   }
 
   try {
-    if (INITIAL_STATS && document.getElementById('server-dashboard')) {
-      document.getElementById('refreshBtn')?.addEventListener('click', renderDashboard);
-      document.getElementById('logoutBtn')?.addEventListener('click', async () => {
-        try { await fetch('/__shield/admin/logout', { method: 'POST' }); } catch {}
-        clearToken();
-        renderLogin();
-      });
-    } else {
-      renderDashboard();
-    }
+    renderDashboard(INITIAL_STATS || null);
 
     setInterval(() => {
       if (document.getElementById('bpChart')) renderDashboard();
