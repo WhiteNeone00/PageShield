@@ -420,7 +420,7 @@ export default {
       spam, hardBlocked, attackFlags, ddosSuspect,
       clientType, headerPresenceScore, ipRate, prefixRate, ipPrefix,
       isBotFarm, countryAnomaly, tlsScore, tlsSignals,
-      fpSpam, fpHardBlocked, patternScore, identicalPathBurst, paramEnumeration,
+      fpSpam, fpHardBlocked, patternScore,
     } = signals;
     const runtimeVpnProxy = vpnProxy || runtimePolicy.extraVpnHints.some((hint) => String(asOrg || '').toLowerCase().includes(hint));
     const baseThreatScore = computeThreatScore(request, signals);
@@ -539,14 +539,25 @@ export default {
     for (const extraPath of runtimePolicy.extraHoneypotPaths) {
       if (String(extraPath || '').startsWith('/')) instantBanHoneypots.add(String(extraPath));
     }
-    if (runtimePolicy.honeypotEnabled && !verified && instantBanHoneypots.has(pathLower)) {
-      const penalty = await setPermanentPenalty(env, ip, 'Instant honeypot endpoint: ' + pathLower, baseDetails);
-      applyPenaltyToDetails(baseDetails, penalty);
-      emitBlockLogs(ctx, env, 'HONEYPOT', 'Instant-ban honeypot triggered: ' + pathLower, baseDetails, signals, fpHash, ip, asn);
-      return new Response(htmlHoneypotTriggered(host, rayId), {
-        status: 403,
-        headers: securityHeaders(new Headers({ 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })),
-      });
+    if (runtimePolicy.honeypotEnabled && instantBanHoneypots.has(pathLower)) {
+      if (!verified) {
+        const penalty = await setPermanentPenalty(env, ip, 'Instant honeypot endpoint: ' + pathLower, baseDetails);
+        applyPenaltyToDetails(baseDetails, penalty);
+        emitBlockLogs(ctx, env, 'HONEYPOT', 'Instant-ban honeypot triggered: ' + pathLower, baseDetails, signals, fpHash, ip, asn);
+        return new Response(htmlHoneypotTriggered(host, rayId), {
+          status: 403,
+          headers: securityHeaders(new Headers({ 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })),
+        });
+      }
+
+      const challengeBody = htmlChallenge(host, rayId, colo, utcTime, threatScore);
+      const challengeHeaders = clearShieldCookies(securityHeaders(new Headers({ 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })));
+      challengeHeaders.append('set-cookie', COOKIE_RISK_NAME + '=' + String(Math.max(60, Number(threatScore || 0))) + '; Path=/; Max-Age=120; HttpOnly; Secure; SameSite=Lax');
+      ctx.waitUntil(Promise.all([
+        sendDiscordWebhook(env, 'CHALLENGED', 'Verified session hit honeypot endpoint: ' + pathLower, baseDetails),
+        logToD1(env, 'CHALLENGED', 'Verified session hit honeypot endpoint: ' + pathLower, baseDetails),
+      ]));
+      return new Response(challengeBody, { status: 403, headers: challengeHeaders });
     }
 
     // ── Honeypot trap from LISTS ──
@@ -557,14 +568,25 @@ export default {
     const effectiveHoneypotPaths = honeypotPaths
       .map((p) => String(p || '').toLowerCase().trim())
       .filter((p) => p.startsWith('/') && !ignoredHoneypotPaths.has(p));
-    if (runtimePolicy.honeypotEnabled && !verified && effectiveHoneypotPaths.some(p => pathLower === p || pathLower.startsWith(p + '/'))) {
-      const penalty = await escalateIpPenalty(env, ip, 'Honeypot path: ' + url.pathname, baseDetails);
-      applyPenaltyToDetails(baseDetails, penalty);
-      emitBlockLogs(ctx, env, 'HONEYPOT', 'Honeypot triggered: ' + url.pathname, baseDetails, signals, fpHash, ip, asn);
-      return new Response(htmlHoneypotTriggered(host, rayId), {
-        status: 403,
-        headers: securityHeaders(new Headers({ 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })),
-      });
+    if (runtimePolicy.honeypotEnabled && effectiveHoneypotPaths.some(p => pathLower === p || pathLower.startsWith(p + '/'))) {
+      if (!verified) {
+        const penalty = await escalateIpPenalty(env, ip, 'Honeypot path: ' + url.pathname, baseDetails);
+        applyPenaltyToDetails(baseDetails, penalty);
+        emitBlockLogs(ctx, env, 'HONEYPOT', 'Honeypot triggered: ' + url.pathname, baseDetails, signals, fpHash, ip, asn);
+        return new Response(htmlHoneypotTriggered(host, rayId), {
+          status: 403,
+          headers: securityHeaders(new Headers({ 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })),
+        });
+      }
+
+      const challengeBody = htmlChallenge(host, rayId, colo, utcTime, threatScore);
+      const challengeHeaders = clearShieldCookies(securityHeaders(new Headers({ 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })));
+      challengeHeaders.append('set-cookie', COOKIE_RISK_NAME + '=' + String(Math.max(50, Number(threatScore || 0))) + '; Path=/; Max-Age=120; HttpOnly; Secure; SameSite=Lax');
+      ctx.waitUntil(Promise.all([
+        sendDiscordWebhook(env, 'CHALLENGED', 'Verified session hit honeypot path: ' + url.pathname, baseDetails),
+        logToD1(env, 'CHALLENGED', 'Verified session hit honeypot path: ' + url.pathname, baseDetails),
+      ]));
+      return new Response(challengeBody, { status: 403, headers: challengeHeaders });
     }
 
     const authPressure = await trackAuthPressure(env, ip, fpHash, pathLower);
