@@ -8,7 +8,8 @@
 import {
   COOKIE_NAME, COOKIE_EXP_NAME, COOKIE_SIG_NAME,
   COOKIE_FP_NAME, COOKIE_RISK_NAME, COOKIE_MAX_AGE,
-  POW_DIFFICULTY, CHALLENGE_NONCE_TTL,
+  POW_DIFFICULTY, CHALLENGE_NONCE_TTL, DEFAULT_POLICY,
+  POLICY_KEY,
 } from './core.config.js';
 import { getClientIp, parseCookies, securityHeaders, clip, penaltyLabel, sha256 } from './core.utils.js';
 import { kvGetJson, kvPutJson } from './core.storage.js';
@@ -42,27 +43,38 @@ import {
   handleUnblacklist, handleWhitelistExtraView, handleWhitelistExtraUpdate,
 } from './middleware.api.js';
 import { handleAdminRoutes, resolveDashboardSession } from './admin.routes.js';
+import { lookupSite, buildOriginRequest } from './engine.sites.js';
 
 const FP_HASH_RE = /^[a-f0-9]{64}$/;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const SIG_RE = /^[a-f0-9]{64}$/i;
 const CHALLENGE_MIN_TTL = 30;
 const CHALLENGE_MAX_TTL = 120;
-const POLICY_DEFAULTS = {
-  protectEnabled: true,
-  rateLimitEnabled: true,
-  attackBlockEnabled: true,
-  honeypotEnabled: true,
-  aiCrawlerBlockEnabled: true,
-  ddosBlockEnabled: true,
-  vpnBlockEnabled: true,
-  extraHoneypotPaths: [],
-  extraVpnHints: [],
-};
+
 const SENSITIVE_AUTH_PATHS = new Set([
   '/login', '/signin', '/auth', '/auth/login', '/api/token', '/oauth/token',
   '/wp-login.php', '/xmlrpc.php', '/admin/login', '/user/login',
 ]);
+
+// ─── Origin Health Cache (suppress repeated ERROR webhooks) ─────
+const originDownCache = new Map();
+const ORIGIN_DOWN_SUPPRESS_MS = 10 * 60 * 1000; // 10 min
+
+function isOriginKnownDown(host) {
+  const exp = originDownCache.get(host);
+  if (!exp) return false;
+  if (Date.now() > exp) { originDownCache.delete(host); return false; }
+  return true;
+}
+
+function markOriginDown(host) {
+  originDownCache.set(host, Date.now() + ORIGIN_DOWN_SUPPRESS_MS);
+  // Cap cache size
+  if (originDownCache.size > 200) {
+    const now = Date.now();
+    for (const [k, v] of originDownCache) { if (v <= now) originDownCache.delete(k); }
+  }
+}
 
 function clamp(num, min, max) {
   return Math.max(min, Math.min(max, num));
@@ -228,9 +240,9 @@ async function clearPowFailStreak(env, ip, fpHash) {
 }
 
 async function loadRuntimePolicy(env) {
-  if (!env?.SHIELD_KV) return { ...POLICY_DEFAULTS };
+  if (!env?.SHIELD_KV) return { ...DEFAULT_POLICY };
   try {
-    const raw = await env.SHIELD_KV.get('shield:config:policy', 'json');
+    const raw = await env.SHIELD_KV.get(POLICY_KEY, 'json');
     const data = raw && typeof raw === 'object' ? raw : {};
     return {
       protectEnabled: data.protectEnabled !== false,
@@ -244,7 +256,7 @@ async function loadRuntimePolicy(env) {
       extraVpnHints: Array.isArray(data.extraVpnHints) ? data.extraVpnHints.map((x) => String(x || '').toLowerCase().trim()).filter(Boolean) : [],
     };
   } catch {
-    return { ...POLICY_DEFAULTS };
+    return { ...DEFAULT_POLICY };
   }
 }
 
@@ -341,6 +353,33 @@ export default {
       return adminResponse;
     }
 
+    // ── Early silent block for already-blacklisted/suspended IPs ──
+    // Skips entire detection pipeline, KV writes, and webhook spam
+    if (!isWhitelistedIp(ip)) {
+      const earlyBlacklist = await getIpBlacklistStatus(env, ip);
+      if (earlyBlacklist.blocked) {
+        const silentReason = earlyBlacklist.source.includes('permanent')
+          ? 'Permanently suspended' : 'IP address suspended';
+        ctx.waitUntil(logToD1(env, 'HARD_BLOCKED', 'Silent re-block (' + earlyBlacklist.source + ')', {
+          ip, ua, method, host, path: url.pathname + url.search,
+          rayId, country: request.cf?.country || 'N/A',
+          asOrg: request.cf?.asOrganization || 'N/A',
+          asn: String(request.cf?.asn || 'N/A'),
+          colo, utcTime,
+          tlsVersion: request.cf?.tlsVersion || 'N/A',
+          httpVersion: request.cf?.httpProtocol || 'N/A',
+          threatScore: 100,
+        }));
+        return new Response(htmlSuspended(host, rayId, silentReason), {
+          status: 403,
+          headers: securityHeaders(new Headers({
+            'content-type': 'text/html; charset=utf-8',
+            'cache-control': 'no-store',
+          })),
+        });
+      }
+    }
+
     const runtimePolicy = await loadRuntimePolicy(env);
 
     const referer = request.headers.get('referer') || 'N/A';
@@ -373,6 +412,7 @@ export default {
       0,
       100
     );
+    const escalationAction = determineEscalation(threatScore, signals);
 
     const baseDetails = {
       ip, ua, method, referer, acceptLanguage,
@@ -392,16 +432,28 @@ export default {
       _baseThreatScore: baseThreatScore,
       _ipRepInfluence: ipRepInfluence,
       _trustedAsnOrg: trustedAsnOrg,
+      _escalation: escalationAction,
+      _fpHardBlocked: fpHardBlocked,
     };
 
     const proxyWithMaintenanceFallback = async (req, contextLabel = 'origin_proxy') => {
+      // ── Multi-tenant origin resolution ──
+      const siteResult = await lookupSite(env, host);
+      const originReq = siteResult.found
+        ? buildOriginRequest(req, siteResult.site)
+        : req;
+
       try {
-        const response = await fetch(req);
+        const response = await fetch(originReq);
         if (response.status >= 500) {
-          ctx.waitUntil(Promise.all([
-            logErrorToD1(env, 'Origin responded with ' + response.status, `${contextLabel}_upstream_5xx`, baseDetails),
-            sendDiscordWebhook(env, 'ERROR', 'Origin returned ' + response.status + ' (maintenance fallback)', baseDetails),
-          ]));
+          const alreadyKnown = isOriginKnownDown(host);
+          markOriginDown(host);
+          // Always log to D1, only webhook on first detection
+          const tasks = [logErrorToD1(env, 'Origin responded with ' + response.status, `${contextLabel}_upstream_5xx`, baseDetails)];
+          if (!alreadyKnown) {
+            tasks.push(sendDiscordWebhook(env, 'ERROR', 'Origin returned ' + response.status + ' (maintenance fallback)', baseDetails));
+          }
+          ctx.waitUntil(Promise.all(tasks));
           return new Response(htmlServiceDown(host, rayId), {
             status: 502,
             headers: securityHeaders(new Headers({ 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })),
@@ -412,10 +464,13 @@ export default {
         securityHeaders(newHeaders);
         return new Response(response.body, { status: response.status, statusText: response.statusText, headers: newHeaders });
       } catch (err) {
-        ctx.waitUntil(Promise.all([
-          logErrorToD1(env, 'Origin fetch failed: ' + err.message, err.stack, baseDetails),
-          sendDiscordWebhook(env, 'ERROR', 'Origin fetch failed: ' + err.message, baseDetails),
-        ]));
+        const alreadyKnown = isOriginKnownDown(host);
+        markOriginDown(host);
+        const tasks = [logErrorToD1(env, 'Origin fetch failed: ' + err.message, err.stack, baseDetails)];
+        if (!alreadyKnown) {
+          tasks.push(sendDiscordWebhook(env, 'ERROR', 'Origin fetch failed: ' + err.message, baseDetails));
+        }
+        ctx.waitUntil(Promise.all(tasks));
         return new Response(htmlServiceDown(host, rayId), {
           status: 502,
           headers: securityHeaders(new Headers({ 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })),
@@ -776,7 +831,9 @@ export default {
               const replayKey = `shield:challenge:usedsig:${providedSig}`;
               fallbackReplayUsed = !!(await env.SHIELD_KV.get(replayKey));
               if (!fallbackReplayUsed) {
-                await env.SHIELD_KV.put(replayKey, '1', { expirationTtl: fallbackTtl });
+                try {
+                  await env.SHIELD_KV.put(replayKey, '1', { expirationTtl: fallbackTtl });
+                } catch { /* KV write limit — proceed with HMAC-only validation */ }
               }
             }
 
@@ -976,7 +1033,6 @@ export default {
       ctx.waitUntil(storeBehaviorProfile(env, { event: 'PASSED', fpHash: safeFp, ip, asn, country }));
       ctx.waitUntil(Promise.all([
         sendDiscordWebhookDelayed(env, 'PASSED', 'Challenge solved (PoW verified)', baseDetails, 3000),
-        sendExternalLog(env, 'PASSED', 'PoW verified', baseDetails),
         logToD1(env, 'PASSED', 'PoW verified', baseDetails),
         incrementKvStat(env, 'passed'),
         incrementKvStat(env, 'total'),
@@ -987,7 +1043,7 @@ export default {
     }
 
     // ── Skip protection for unprotected routes ──
-    if (!runtimePolicy.protectEnabled || !shouldProtect(url)) {
+    if (!runtimePolicy.protectEnabled || !(await shouldProtect(env, url))) {
       return proxyWithMaintenanceFallback(request, 'unprotected_origin_proxy');
     }
 
@@ -1007,11 +1063,11 @@ export default {
       });
     }
 
-    // ── IP Blacklist hard block ──
+    // ── IP Blacklist hard block (silent — no webhook, D1 only) ──
     const blacklistStatus = await getIpBlacklistStatus(env, ip);
     if (blacklistStatus.blocked) {
       applyPenaltyToDetails(baseDetails, blacklistStatus.penalty);
-      emitBlockLogs(ctx, env, 'HARD_BLOCKED', 'IP Blacklisted (' + blacklistStatus.source + ')', baseDetails, signals, fpHash, ip, asn);
+      ctx.waitUntil(logToD1(env, 'HARD_BLOCKED', 'IP Blacklisted (' + blacklistStatus.source + ')', baseDetails));
       const reason = blacklistStatus.source.includes('permanent') ? 'Permanently suspended' : 'IP address suspended';
       return new Response(htmlSuspended(host, rayId, reason), {
         status: 403,
@@ -1100,32 +1156,46 @@ export default {
       verified = await hmacVerify(secret, tokenData, cookieSig);
     }
 
-    // ── Challenge Escalation Decision ──
-    const escalation = determineEscalation(threatScore, signals);
+    // ── Challenge Escalation Decision (reuse pre-computed value) ──
+    const escalation = baseDetails._escalation;
 
     if (!verified || suspicious || headless || (runtimePolicy.rateLimitEnabled && (spam || fpSpam)) || (runtimePolicy.aiCrawlerBlockEnabled && aiCrawler) || (runtimePolicy.ddosBlockEnabled && ddosSuspect)) {
       if ((method === 'GET' || method === 'HEAD') && !url.pathname.startsWith('/__')) {
         try {
-          let probe = await fetch(new Request(request, { method: 'HEAD' }));
+          // Multi-tenant origin probe
+          const probeSiteResult = await lookupSite(env, host);
+          const probeReq = probeSiteResult.found
+            ? buildOriginRequest(new Request(request, { method: 'HEAD' }), probeSiteResult.site)
+            : new Request(request, { method: 'HEAD' });
+          let probe = await fetch(probeReq);
           if (probe.status === 405) {
-            probe = await fetch(request);
+            const probeReq2 = probeSiteResult.found
+              ? buildOriginRequest(request, probeSiteResult.site)
+              : request;
+            probe = await fetch(probeReq2);
           }
 
           if (probe.status >= 500) {
-            ctx.waitUntil(Promise.all([
-              logErrorToD1(env, 'Origin responded with ' + probe.status, 'pre_challenge_upstream_5xx', baseDetails),
-              sendDiscordWebhook(env, 'ERROR', 'Origin returned ' + probe.status + ' (pre-challenge maintenance fallback)', baseDetails),
-            ]));
+            const alreadyKnown = isOriginKnownDown(host);
+            markOriginDown(host);
+            const tasks = [logErrorToD1(env, 'Origin responded with ' + probe.status, 'pre_challenge_upstream_5xx', baseDetails)];
+            if (!alreadyKnown) {
+              tasks.push(sendDiscordWebhook(env, 'ERROR', 'Origin returned ' + probe.status + ' — origin down', baseDetails));
+            }
+            ctx.waitUntil(Promise.all(tasks));
             return new Response(htmlServiceDown(host, rayId), {
               status: 502,
               headers: securityHeaders(new Headers({ 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })),
             });
           }
         } catch (probeErr) {
-          ctx.waitUntil(Promise.all([
-            logErrorToD1(env, 'Origin pre-challenge probe failed: ' + probeErr.message, probeErr.stack, baseDetails),
-            sendDiscordWebhook(env, 'ERROR', 'Origin pre-challenge probe failed: ' + probeErr.message, baseDetails),
-          ]));
+          const alreadyKnown = isOriginKnownDown(host);
+          markOriginDown(host);
+          const tasks = [logErrorToD1(env, 'Origin pre-challenge probe failed: ' + probeErr.message, probeErr.stack, baseDetails)];
+          if (!alreadyKnown) {
+            tasks.push(sendDiscordWebhook(env, 'ERROR', 'Origin probe failed: ' + probeErr.message, baseDetails));
+          }
+          ctx.waitUntil(Promise.all(tasks));
           return new Response(htmlServiceDown(host, rayId), {
             status: 502,
             headers: securityHeaders(new Headers({ 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })),

@@ -175,6 +175,7 @@ export function htmlShieldStats(host, initialStats = null) {
   let chart = null;
   let activeTab = 'overview';
   let runtimePolicy = null;
+  let sitesData = null;
   let toastTimer = null;
 
   function esc(v){return String(v==null?'':v).replace(/[&<>"']/g,function(m){return ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'})[m];});}
@@ -294,6 +295,7 @@ export function htmlShieldStats(host, initialStats = null) {
       ['threats','Threats'],
       ['traffic','Traffic'],
       ['topips','Top IPs'],
+      ['sites','Protected Sites'],
       ['profile','Profile'],
       ['settings','Settings'],
     ];
@@ -310,9 +312,10 @@ export function htmlShieldStats(host, initialStats = null) {
 
   function rail(){
     return '<aside class="rail">'
-      + '<button class="rail-btn active" data-tab="overview">🛡️</button>'
-      + '<button class="rail-btn" data-tab="threats">📊</button>'
-      + '<button class="rail-btn" data-tab="settings">⚙️</button>'
+      + '<button class="rail-btn' + (activeTab==='overview'?' active':'') + '" data-tab="overview">🛡️</button>'
+      + '<button class="rail-btn' + (activeTab==='threats'?' active':'') + '" data-tab="threats">📊</button>'
+      + '<button class="rail-btn' + (activeTab==='sites'?' active':'') + '" data-tab="sites">🌐</button>'
+      + '<button class="rail-btn' + (activeTab==='settings'?' active':'') + '" data-tab="settings">⚙️</button>'
       + '</aside>';
   }
 
@@ -402,6 +405,32 @@ export function htmlShieldStats(host, initialStats = null) {
       + '</div></section>'
       + '<section class="glass-card" style="margin-top:12px"><div class="section-title">Environment</div><div class="section-sub">Shield version: ' + esc(stats.version || 'v3') + '</div><div class="muted" style="margin-top:8px;word-break:break-all">' + esc(navigator.userAgent || 'Unknown') + '</div></section>'
       + '</div>';
+  }
+
+  function sitesTab(sites){
+    const rows = (sites || []);
+    return '<div class="tabs-shell">'
+      + '<section class="glass-card"><div class="section-title">Protected Sites</div><div class="section-sub">Manage domains proxied through Ryzeon Shield</div>'
+      + '<div class="top-actions" style="margin-top:12px"><button id="addSiteBtn" class="btn">+ Add Domain</button></div>'
+      + '<div class="list" style="margin-top:14px">'
+      + (rows.length ? rows.map(function(s){
+        const statusBadge = s.active ? '<span class="chip" style="border-color:rgba(45,223,135,.5);color:var(--ok)">Active</span>' : '<span class="chip" style="border-color:rgba(255,95,122,.5);color:var(--bad)">Disabled</span>';
+        return '<div class="glass-card" style="padding:12px;margin-bottom:8px">'
+          + '<div class="row"><span style="font-weight:700">' + esc(s.domain || 'N/A') + '</span>' + statusBadge + '</div>'
+          + '<div class="row" style="margin-top:6px"><span class="muted">Origin: ' + esc(s.originUrl || 'N/A') + '</span><span class="muted">Plan: ' + esc(s.plan || 'free') + '</span></div>'
+          + '<div class="row" style="margin-top:6px"><span class="muted">API Key: <code style="font-size:.75rem;color:var(--blue2)">' + esc(s.apiKey || 'N/A') + '</code></span></div>'
+          + '<div class="top-actions" style="margin-top:8px">'
+          + '<button class="btn secondary" data-site-toggle="' + esc(s.domain) + '" data-site-active="' + (s.active ? '1' : '0') + '">' + (s.active ? 'Disable' : 'Enable') + '</button>'
+          + '<button class="btn danger" data-site-remove="' + esc(s.domain) + '">Remove</button>'
+          + '</div></div>';
+      }).join('') : '<div class="muted">No protected sites yet. Add a domain to get started.</div>')
+      + '</div></section>'
+      + '<section class="glass-card" style="margin-top:12px"><div class="section-title">How it works</div><div class="muted" style="margin-top:8px;line-height:1.6">'
+      + '1. Add your domain and origin server URL above.<br>'
+      + '2. Create a <strong>CNAME</strong> record pointing your domain to your Shield worker hostname (e.g. <code style="color:var(--blue2)">' + safeHost + '</code>).<br>'
+      + '3. All traffic to your domain will be proxied through Ryzeon Shield with full DDoS protection.<br>'
+      + '4. Your origin IP stays hidden — visitors only see your domain.'
+      + '</div></section></div>';
   }
 
   function settingsTab(policy){
@@ -548,6 +577,95 @@ export function htmlShieldStats(host, initialStats = null) {
         }
       });
     });
+
+    /* ── Sites tab actions ── */
+    const addSiteBtn = document.getElementById('addSiteBtn');
+    if (addSiteBtn) {
+      addSiteBtn.onclick = function(){
+        openModal(
+          '<div class="muted">Register a new domain to protect via Ryzeon Shield.</div>'
+          + '<label class="muted">Domain (e.g. app.example.com)</label>'
+          + '<input id="siteDomain" class="input" placeholder="app.example.com">'
+          + '<label class="muted">Origin URL (your real server)</label>'
+          + '<input id="siteOrigin" class="input" placeholder="https://123.456.789.0:443">'
+          + '<label class="muted">Owner Email (optional)</label>'
+          + '<input id="siteEmail" class="input" placeholder="admin@example.com">'
+          + '<label class="muted">Plan</label>'
+          + '<select id="sitePlan" class="input"><option value="free">Free</option><option value="pro">Pro</option><option value="enterprise">Enterprise</option></select>'
+          + '<div class="top-actions" style="margin-top:8px"><button id="siteAddSubmit" class="btn">Add Site</button><button id="siteAddCancel" class="btn secondary">Cancel</button></div>'
+        );
+        var siteAddCancel = document.getElementById('siteAddCancel');
+        if (siteAddCancel) siteAddCancel.onclick = closeModal;
+        var siteAddSubmit = document.getElementById('siteAddSubmit');
+        if (siteAddSubmit) {
+          siteAddSubmit.onclick = async function(){
+            try {
+              siteAddSubmit.disabled = true;
+              var domain = (document.getElementById('siteDomain') || {}).value || '';
+              var origin_url = (document.getElementById('siteOrigin') || {}).value || '';
+              var owner_email = (document.getElementById('siteEmail') || {}).value || '';
+              var plan = (document.getElementById('sitePlan') || {}).value || 'free';
+              if (!domain || !origin_url) throw new Error('Domain and origin URL are required');
+              await api('/__shield/admin/sites/add', { method: 'POST', body: JSON.stringify({ domain: domain, origin_url: origin_url, owner_email: owner_email, plan: plan }) });
+              closeModal();
+              toast('Site added: ' + domain, 'ok');
+              sitesData = null;
+              await renderDashboard();
+            } catch (e) {
+              toast((e && e.message) || 'Failed to add site', 'error');
+            } finally {
+              siteAddSubmit.disabled = false;
+            }
+          };
+        }
+      };
+    }
+
+    var siteToggleBtns = app.querySelectorAll('[data-site-toggle]');
+    siteToggleBtns.forEach(function(btn){
+      btn.addEventListener('click', async function(){
+        var domain = btn.getAttribute('data-site-toggle') || '';
+        var currentActive = btn.getAttribute('data-site-active') === '1';
+        try {
+          btn.disabled = true;
+          await api('/__shield/admin/sites/toggle', { method: 'POST', body: JSON.stringify({ domain: domain, active: !currentActive }) });
+          toast(domain + (currentActive ? ' disabled' : ' enabled'), 'ok');
+          sitesData = null;
+          await renderDashboard();
+        } catch (e) {
+          toast((e && e.message) || 'Toggle failed', 'error');
+        } finally { btn.disabled = false; }
+      });
+    });
+
+    var siteRemoveBtns = app.querySelectorAll('[data-site-remove]');
+    siteRemoveBtns.forEach(function(btn){
+      btn.addEventListener('click', function(){
+        var domain = btn.getAttribute('data-site-remove') || '';
+        openModal(
+          '<div class="muted">Are you sure you want to remove <strong>' + esc(domain) + '</strong>?</div>'
+          + '<div class="muted" style="color:var(--bad)">This will stop proxying all traffic for this domain.</div>'
+          + '<div class="top-actions" style="margin-top:10px"><button id="siteRemoveConfirm" class="btn danger">Remove</button><button id="siteRemoveCancel" class="btn secondary">Cancel</button></div>'
+        );
+        var cancelBtn = document.getElementById('siteRemoveCancel');
+        if (cancelBtn) cancelBtn.onclick = closeModal;
+        var confirmBtn = document.getElementById('siteRemoveConfirm');
+        if (confirmBtn) {
+          confirmBtn.onclick = async function(){
+            try {
+              confirmBtn.disabled = true;
+              await api('/__shield/admin/sites/remove', { method: 'POST', body: JSON.stringify({ domain: domain }) });
+              closeModal();
+              toast('Site removed: ' + domain, 'ok');
+              sitesData = null;
+              await renderDashboard();
+            } catch (e) {
+              toast((e && e.message) || 'Remove failed', 'error');
+            } finally { confirmBtn.disabled = false; }
+          };
+        }
+      });
+    });
   }
 
   async function loadPolicyIfNeeded(){
@@ -559,6 +677,17 @@ export function htmlShieldStats(host, initialStats = null) {
     } catch (e) {
       toast('Could not load policy', 'error');
       runtimePolicy = {};
+    }
+  }
+
+  async function loadSitesIfNeeded(){
+    if (activeTab !== 'sites') return;
+    try {
+      const data = await api('/__shield/admin/sites');
+      sitesData = data.sites || [];
+    } catch (e) {
+      toast('Could not load sites', 'error');
+      sitesData = [];
     }
   }
 
@@ -575,12 +704,14 @@ export function htmlShieldStats(host, initialStats = null) {
     }
 
     await loadPolicyIfNeeded();
+    await loadSitesIfNeeded();
 
     let content = '';
     if (activeTab === 'overview') content = overviewTab(stats);
     else if (activeTab === 'threats') content = threatsTab(stats);
     else if (activeTab === 'traffic') content = trafficTab(stats);
     else if (activeTab === 'topips') content = topIpsTab(stats);
+    else if (activeTab === 'sites') content = sitesTab(sitesData || []);
     else if (activeTab === 'profile') content = profileTab(stats);
     else if (activeTab === 'settings') content = settingsTab(runtimePolicy || {});
     else content = overviewTab(stats);

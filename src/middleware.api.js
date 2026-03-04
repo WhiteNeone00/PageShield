@@ -3,7 +3,7 @@
    Stats, list management, blacklist management
    ═══════════════════════════════════════════════════════════════════ */
 
-import { LIST_CACHE_TTL } from './core.config.js';
+import { LIST_CACHE_TTL, BLACKLIST_KEY, WHITELIST_EXTRA_KEY } from './core.config.js';
 import { securityHeaders, normalizeIp, penaltyLabel, parseIpListPayload } from './core.utils.js';
 import { kvGetJson } from './core.storage.js';
 import {
@@ -15,8 +15,6 @@ import {
   loadDynamicIpBlacklist, resetBlacklistCache, getMergedStaticBlacklist,
   setDynamicBlacklist,
 } from './engine.blacklist.js';
-
-const WHITELIST_EXTRA_KEY = 'shield:whitelist:extra';
 
 function normalizeIpSet(values) {
   return [...new Set((values || []).map((value) => normalizeIp(value)).filter(Boolean))];
@@ -188,7 +186,7 @@ export async function handleBlacklistUpdate(env, request) {
   }
 
   if (env?.SHIELD_KV) {
-    await env.SHIELD_KV.put('remote:blacklisted_ips', JSON.stringify(ips), { expirationTtl: LIST_CACHE_TTL * 24 });
+    await env.SHIELD_KV.put(BLACKLIST_KEY, JSON.stringify(ips), { expirationTtl: LIST_CACHE_TTL * 24 });
   }
 
   const merged = getMergedStaticBlacklist(env);
@@ -256,11 +254,11 @@ export async function handleUnblacklist(env, request, requesterIp = '') {
     } catch {}
 
     try {
-      const remoteRaw = await env.SHIELD_KV.get('remote:blacklisted_ips', 'json');
+      const remoteRaw = await env.SHIELD_KV.get(BLACKLIST_KEY, 'json');
       const remoteIps = parseIpListPayload(remoteRaw).map((value) => normalizeIp(value)).filter(Boolean);
       const filtered = remoteIps.filter((value) => value !== targetIp);
       if (filtered.length !== remoteIps.length) {
-        await env.SHIELD_KV.put('remote:blacklisted_ips', JSON.stringify(filtered), { expirationTtl: LIST_CACHE_TTL * 24 });
+        await env.SHIELD_KV.put(BLACKLIST_KEY, JSON.stringify(filtered), { expirationTtl: LIST_CACHE_TTL * 24 });
         result.remoteBlacklistRemoved = true;
       }
     } catch {}

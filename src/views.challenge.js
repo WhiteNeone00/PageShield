@@ -426,28 +426,7 @@ export function htmlChallenge(host, rayId, colo, utcTime, threatScore) {
 
   function solvePoW(prefix,difficulty){
     var target='';for(var i=0;i<difficulty;i++)target+='0';
-    var nonce=0;
-    function step(){
-      var batch=500;
-      while(batch-->0){
-        var data=prefix+':'+nonce;
-        // Use sync approach with batch yielding
-        nonce++;
-      }
-      return null;
-    }
-    // Async PoW solver
     return new Promise(function(resolve){
-      var n=0;
-      function tick(){
-        var end=n+2000;
-        while(n<end){
-          var data=prefix+':'+n;
-          // We need async digest, so batch with promises
-          n++;
-        }
-      }
-      // Full async solver
       var nn=0;
       function asyncSolve(){
         var promises=[];
@@ -660,9 +639,4 @@ export function htmlHardBlock(host, rayId, reason) {
   });
 }
 
-// ─── Legacy Invisible Challenge (kept for backward compatibility) ─
-export function htmlInvisibleChallenge() {
-  return '<!doctype html><html><head><meta charset="utf-8"/></head><body><script>'
-    + 'location.replace(location.href);'
-    + '<\/script></body></html>';
-}
+

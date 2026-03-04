@@ -2,7 +2,7 @@
    Ryzeon Shield v3 — Dynamic IP Blacklist Management
    ═══════════════════════════════════════════════════════════════════ */
 
-import { BLACKLIST_CACHE_TTL } from './core.config.js';
+import { BLACKLIST_CACHE_TTL, BLACKLIST_KEY } from './core.config.js';
 import { normalizeIp, parseIpListPayload } from './core.utils.js';
 
 // ─── Blacklist State ─────────────────────────────────────────────
@@ -25,7 +25,7 @@ export async function loadDynamicIpBlacklist(env) {
 
   if (env?.SHIELD_KV) {
     try {
-      const cached = await env.SHIELD_KV.get('remote:blacklisted_ips', 'json');
+      const cached = await env.SHIELD_KV.get(BLACKLIST_KEY, 'json');
       const cachedIps = parseIpListPayload(cached);
       for (const ip of cachedIps) {
         const n = normalizeIp(ip);
@@ -56,7 +56,7 @@ export async function loadDynamicIpBlacklist(env) {
         }
         if (env?.SHIELD_KV && urlIps.length) {
           try {
-            await env.SHIELD_KV.put('remote:blacklisted_ips', JSON.stringify(urlIps), { expirationTtl: BLACKLIST_CACHE_TTL });
+            await env.SHIELD_KV.put(BLACKLIST_KEY, JSON.stringify(urlIps), { expirationTtl: BLACKLIST_CACHE_TTL });
           } catch {}
         }
       }

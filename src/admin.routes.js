@@ -1,20 +1,6 @@
-import { normalizeIp, parseIpListPayload, securityHeaders } from './core.utils.js';
-
-const BLACKLIST_KEY = 'remote:blacklisted_ips';
-const WHITELIST_EXTRA_KEY = 'shield:whitelist:extra';
-const POLICY_KEY = 'shield:config:policy';
-
-const DEFAULT_POLICY = {
-  protectEnabled: true,
-  rateLimitEnabled: true,
-  attackBlockEnabled: true,
-  honeypotEnabled: true,
-  aiCrawlerBlockEnabled: true,
-  ddosBlockEnabled: true,
-  vpnBlockEnabled: true,
-  extraHoneypotPaths: [],
-  extraVpnHints: [],
-};
+import { normalizeIp, parseIpListPayload, securityHeaders, parseCookies } from './core.utils.js';
+import { listSites, addSite, removeSite, updateSite } from './engine.sites.js';
+import { DEFAULT_POLICY, BLACKLIST_KEY, WHITELIST_EXTRA_KEY, POLICY_KEY } from './core.config.js';
 
 function json(body, status = 200) {
   return new Response(JSON.stringify(body, null, 2), {
@@ -24,20 +10,6 @@ function json(body, status = 200) {
       'cache-control': 'no-store',
     })),
   });
-}
-
-function parseCookies(header) {
-  const out = {};
-  const src = String(header || '');
-  if (!src) return out;
-  for (const part of src.split(';')) {
-    const idx = part.indexOf('=');
-    if (idx < 0) continue;
-    const key = part.slice(0, idx).trim();
-    const value = part.slice(idx + 1).trim();
-    if (key) out[key] = value;
-  }
-  return out;
 }
 
 function b64urlEncode(value) {
@@ -513,6 +485,74 @@ export async function handleAdminRoutes(request, env, requesterIp = '') {
   if (path === '/__shield/admin/dashboard' && method === 'GET') {
     const stats = await getDashboardStats(env);
     return json(stats);
+  }
+
+  // ═══════════════════════════════════════════════════════════════
+  //  Protected Sites Management (Multi-tenant SaaS)
+  // ═══════════════════════════════════════════════════════════════
+
+  if (path === '/__shield/admin/sites' && method === 'GET') {
+    const sites = await listSites(env);
+    return json({ ok: true, count: sites.length, sites });
+  }
+
+  if (path === '/__shield/admin/sites/add' && method === 'POST') {
+    let payload = {};
+    try { payload = await request.json(); } catch {}
+    const domain = String(payload?.domain || '').toLowerCase().trim();
+    const originUrl = String(payload?.originUrl || payload?.origin_url || payload?.origin || '').trim();
+    const ownerEmail = String(payload?.ownerEmail || payload?.email || '').trim();
+    const plan = String(payload?.plan || 'free').trim();
+    const result = await addSite(env, domain, originUrl, ownerEmail, plan);
+    if (!result.ok) return json(result, 400);
+    const workerHost = String(env?.SHIELD_WORKER_HOST || 'your-worker.workers.dev');
+    return json({
+      ok: true,
+      site: result,
+      instructions: {
+        step1: `Add a CNAME record for "${domain}" pointing to "${workerHost}"`,
+        step2: `Or set your domain's DNS A record to proxy through Cloudflare and add a route to this worker`,
+        step3: `Your site API key: ${result.apiKey}`,
+        note: 'Shield will automatically protect all traffic to this domain and reverse-proxy to your origin server.',
+      },
+    });
+  }
+
+  if (path === '/__shield/admin/sites/remove' && method === 'POST') {
+    let payload = {};
+    try { payload = await request.json(); } catch {}
+    const domain = String(payload?.domain || '').toLowerCase().trim();
+    if (!domain) return json({ ok: false, error: 'Domain is required' }, 400);
+    const result = await removeSite(env, domain);
+    if (!result.ok) return json(result, 400);
+    return json(result);
+  }
+
+  if (path === '/__shield/admin/sites/update' && method === 'POST') {
+    let payload = {};
+    try { payload = await request.json(); } catch {}
+    const domain = String(payload?.domain || '').toLowerCase().trim();
+    if (!domain) return json({ ok: false, error: 'Domain is required' }, 400);
+    const updates = {};
+    if (payload.originUrl !== undefined || payload.origin_url !== undefined) updates.originUrl = payload.originUrl || payload.origin_url;
+    if (payload.ownerEmail !== undefined || payload.email !== undefined) updates.ownerEmail = payload.ownerEmail || payload.email;
+    if (payload.plan !== undefined) updates.plan = payload.plan;
+    if (payload.active !== undefined) updates.active = payload.active;
+    if (payload.settings !== undefined) updates.settings = payload.settings;
+    const result = await updateSite(env, domain, updates);
+    if (!result.ok) return json(result, 400);
+    return json(result);
+  }
+
+  if (path === '/__shield/admin/sites/toggle' && method === 'POST') {
+    let payload = {};
+    try { payload = await request.json(); } catch {}
+    const domain = String(payload?.domain || '').toLowerCase().trim();
+    if (!domain) return json({ ok: false, error: 'Domain is required' }, 400);
+    const active = payload?.active !== undefined ? !!payload.active : true;
+    const result = await updateSite(env, domain, { active });
+    if (!result.ok) return json(result, 400);
+    return json({ ok: true, domain, active });
   }
 
   return json({ ok: false, error: 'Not found' }, 404);

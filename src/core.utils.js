@@ -65,7 +65,7 @@ export function parseCookies(header) {
 }
 
 // ─── Crypto Helpers ──────────────────────────────────────────────
-export function toHex(buffer) {
+function toHex(buffer) {
   return [...new Uint8Array(buffer)].map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
@@ -93,12 +93,7 @@ export function severityLabel(score) {
   return 'Low';
 }
 
-export function riskEmoji(score) {
-  if (score >= 70) return '\uD83D\uDD34';
-  if (score >= 50) return '\uD83D\uDFE0';
-  if (score >= 30) return '\uD83D\uDFE1';
-  return '\uD83D\uDFE2';
-}
+
 
 export function threatBar(score) {
   const filled = Math.round(score / 10);

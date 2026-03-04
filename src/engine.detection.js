@@ -60,14 +60,6 @@ export function isIpWhitelisted(ip, env) {
   return list.includes(ip);
 }
 
-export function isIpBlacklisted(ip, env) {
-  const normalized = normalizeIp(ip);
-  if (!normalized) return false;
-  if (dynamicIpBlacklist.has(normalized)) return true;
-  const inline = (env?.IP_BLACKLIST || '').split(',').map((s) => normalizeIp(s)).filter(Boolean);
-  return inline.includes(normalized);
-}
-
 // ─── TLS Fingerprinting ─────────────────────────────────────────
 export function analyzeTls(request) {
   const tls = request.cf?.tlsVersion || '';
@@ -374,10 +366,26 @@ export function determineEscalation(threatScore, signals) {
   return 'allow';
 }
 
-// ─── Route Protection ────────────────────────────────────────────
-export function shouldProtect(url) {
+// ─── Route Protection (dynamic — checks D1 protected_sites + env fallback) ──
+export async function shouldProtect(env, url) {
   const host = url.hostname.toLowerCase();
-  if (host === 'ryzeon.wtf') return true;
-  if (host.endsWith('.ryzeon.wtf')) return true;
+
+  // 1) Check env-configured protected domains (comma-separated)
+  const envDomains = (env?.PROTECTED_DOMAINS || '').split(',').map(d => d.trim().toLowerCase()).filter(Boolean);
+  for (const d of envDomains) {
+    if (host === d || host.endsWith('.' + d)) return true;
+  }
+
+  // 2) Check D1 protected_sites table
+  if (env?.SHIELD_DB) {
+    try {
+      // Try exact match first, then wildcard parent
+      const row = await env.SHIELD_DB.prepare(
+        'SELECT 1 FROM protected_sites WHERE (domain = ? OR domain = ?) AND active = 1 LIMIT 1'
+      ).bind(host, host.replace(/^[^.]+\./, '')).first();
+      if (row) return true;
+    } catch { /* DB error — fall through */ }
+  }
+
   return false;
 }

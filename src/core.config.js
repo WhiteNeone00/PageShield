@@ -52,7 +52,7 @@ export const REQUIRED_LIST_KEYS = [
 ];
 
 // ─── Webhook / Discord ──────────────────────────────────────────
-export const SHIELD_LOGO_URL = 'https://cdn.ryzeon.wtf/logo.webp';
+export const DEFAULT_LOGO_URL = 'https://cdn.ryzeon.wtf/logo.webp';
 
 export const WEBHOOK_COLORS = {
   PASSED: 0x57F287,
@@ -85,3 +85,21 @@ export const DISCORD_WORTHY = new Set([
   'RATE_LIMITED', 'VPN_BLOCKED', 'SUSPENDED', 'COUNTRY_BLOCKED', 'BOT_DETECTED',
   'AI_CRAWLER', 'BOT_FARM', 'HONEYPOT_FORM',
 ]);
+
+// ─── Default Protection Policy ───────────────────────────────────
+export const DEFAULT_POLICY = {
+  protectEnabled: true,
+  rateLimitEnabled: true,
+  attackBlockEnabled: true,
+  honeypotEnabled: true,
+  aiCrawlerBlockEnabled: true,
+  ddosBlockEnabled: true,
+  vpnBlockEnabled: true,
+  extraHoneypotPaths: [],
+  extraVpnHints: [],
+};
+
+// ─── Shared KV Key Constants ─────────────────────────────────────
+export const BLACKLIST_KEY = 'remote:blacklisted_ips';
+export const WHITELIST_EXTRA_KEY = 'shield:whitelist:extra';
+export const POLICY_KEY = 'shield:config:policy';
