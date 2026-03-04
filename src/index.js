@@ -389,6 +389,14 @@ export default {
     const tlsVersion = request.cf?.tlsVersion || 'N/A';
     const httpVersion = request.cf?.httpProtocol || 'N/A';
     const cookies = parseCookies(request.headers.get('cookie'));
+    const clearShieldCookies = (headers) => {
+      headers.append('set-cookie', COOKIE_NAME + '=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax');
+      headers.append('set-cookie', COOKIE_EXP_NAME + '=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax');
+      headers.append('set-cookie', COOKIE_SIG_NAME + '=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax');
+      headers.append('set-cookie', COOKIE_FP_NAME + '=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax');
+      headers.append('set-cookie', COOKIE_RISK_NAME + '=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax');
+      return headers;
+    };
     const verifiedFlag = cookies[COOKIE_NAME] === '1';
     const cookieExp = Number(cookies[COOKIE_EXP_NAME] || 0);
     const cookieSig = cookies[COOKIE_SIG_NAME] || '';
@@ -653,6 +661,14 @@ export default {
 
     // ── PoW Challenge endpoint ──
     if (url.pathname === '/__challenge' && method === 'GET') {
+      const challengeBlacklist = await getIpBlacklistStatus(env, ip);
+      if (challengeBlacklist.blocked) {
+        const headers = clearShieldCookies(securityHeaders(new Headers({ 'content-type': 'application/json', 'cache-control': 'no-store' })));
+        return new Response(JSON.stringify({ ok: false, error: 'Access suspended' }), {
+          status: 403,
+          headers,
+        });
+      }
       const reqCookies = parseCookies(request.headers.get('cookie'));
       const risk = Number(reqCookies[COOKIE_RISK_NAME] || 0);
       const dynamicDifficulty = Math.max(2, Math.min(7, POW_DIFFICULTY + (risk >= 85 ? 3 : risk >= 65 ? 2 : risk >= 40 ? 1 : 0)));
@@ -703,6 +719,14 @@ export default {
 
     // ── Verification endpoint (with behavioral analysis + honeypot check) ──
     if (url.pathname === '/__verify' && method === 'POST') {
+      const verifyBlacklist = await getIpBlacklistStatus(env, ip);
+      if (verifyBlacklist.blocked) {
+        const headers = clearShieldCookies(securityHeaders(new Headers({ 'content-type': 'application/json', 'cache-control': 'no-store' })));
+        return new Response(JSON.stringify({ ok: false, error: 'Access suspended' }), {
+          status: 403,
+          headers,
+        });
+      }
       let valid = false;
       let verifyFpHash = '';
       let behaviorResult = { behaviorScore: 0, isHuman: null, signals: [] };
@@ -1035,6 +1059,14 @@ export default {
       const secret = getSigningSecret(env);
       const exp = Math.floor(nowMs / 1000) + COOKIE_MAX_AGE;
       const safeFp = normalizeFpHash(verifyFpHash) || (await deriveRequestFingerprint(request, ip));
+      const verifyBlacklistAfterValidation = await getIpBlacklistStatus(env, ip);
+      if (verifyBlacklistAfterValidation.blocked) {
+        const denyHeaders = clearShieldCookies(securityHeaders(new Headers({ 'content-type': 'application/json', 'cache-control': 'no-store' })));
+        return new Response(JSON.stringify({ ok: false, error: 'Access suspended' }), {
+          status: 403,
+          headers: denyHeaders,
+        });
+      }
       const tokenData = ip + ':' + exp + ':' + safeFp;
       const sig = await hmacSign(secret, tokenData);
 
