@@ -136,6 +136,13 @@ function compactWebhookReason(reason) {
   const text = String(reason || '').trim();
   if (!text) return 'N/A';
 
+  const ipRep = text.match(/^ip\s+reputation\s+auto-?block(?:\s*\(score:\s*(\d+)\))?/i)
+    || text.match(/^ip\s+rep\s+auto-?block(?:\s*\(score:\s*(\d+)\))?/i);
+  if (ipRep) {
+    const score = ipRep[1];
+    return score ? `IP Rep Block (${score})` : 'IP Rep Block';
+  }
+
   const originReturned = text.match(/^origin returned\s+(\d{3})(?:\s*[—-]\s*|\s+)(.+)$/i);
   if (originReturned) {
     const statusCode = originReturned[1];

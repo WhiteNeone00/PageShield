@@ -355,29 +355,28 @@ export default {
 
     // ── Early silent block for already-blacklisted/suspended IPs ──
     // Skips entire detection pipeline, KV writes, and webhook spam
-    if (!isWhitelistedIp(ip)) {
-      const earlyBlacklist = await getIpBlacklistStatus(env, ip);
-      if (earlyBlacklist.blocked) {
-        const silentReason = earlyBlacklist.source.includes('permanent')
-          ? 'Permanently suspended' : 'IP address suspended';
-        ctx.waitUntil(logToD1(env, 'HARD_BLOCKED', 'Silent re-block (' + earlyBlacklist.source + ')', {
-          ip, ua, method, host, path: url.pathname + url.search,
-          rayId, country: request.cf?.country || 'N/A',
-          asOrg: request.cf?.asOrganization || 'N/A',
-          asn: String(request.cf?.asn || 'N/A'),
-          colo, utcTime,
-          tlsVersion: request.cf?.tlsVersion || 'N/A',
-          httpVersion: request.cf?.httpProtocol || 'N/A',
-          threatScore: 100,
-        }));
-        return new Response(htmlSuspended(host, rayId, silentReason), {
-          status: 403,
-          headers: securityHeaders(new Headers({
-            'content-type': 'text/html; charset=utf-8',
-            'cache-control': 'no-store',
-          })),
-        });
-      }
+    // NOTE: active penalties/blacklist always override whitelist access.
+    const earlyBlacklist = await getIpBlacklistStatus(env, ip);
+    if (earlyBlacklist.blocked) {
+      const silentReason = earlyBlacklist.source.includes('permanent')
+        ? 'Permanently suspended' : 'IP address suspended';
+      ctx.waitUntil(logToD1(env, 'HARD_BLOCKED', 'Silent re-block (' + earlyBlacklist.source + ')', {
+        ip, ua, method, host, path: url.pathname + url.search,
+        rayId, country: request.cf?.country || 'N/A',
+        asOrg: request.cf?.asOrganization || 'N/A',
+        asn: String(request.cf?.asn || 'N/A'),
+        colo, utcTime,
+        tlsVersion: request.cf?.tlsVersion || 'N/A',
+        httpVersion: request.cf?.httpProtocol || 'N/A',
+        threatScore: 100,
+      }));
+      return new Response(htmlSuspended(host, rayId, silentReason), {
+        status: 403,
+        headers: securityHeaders(new Headers({
+          'content-type': 'text/html; charset=utf-8',
+          'cache-control': 'no-store',
+        })),
+      });
     }
 
     const runtimePolicy = await loadRuntimePolicy(env);
@@ -390,6 +389,17 @@ export default {
     const tlsVersion = request.cf?.tlsVersion || 'N/A';
     const httpVersion = request.cf?.httpProtocol || 'N/A';
     const cookies = parseCookies(request.headers.get('cookie'));
+    const verifiedFlag = cookies[COOKIE_NAME] === '1';
+    const cookieExp = Number(cookies[COOKIE_EXP_NAME] || 0);
+    const cookieSig = cookies[COOKIE_SIG_NAME] || '';
+    const cookieFp = String(cookies[COOKIE_FP_NAME] || '');
+    const isExpired = cookieExp > 0 && Math.floor(nowMs / 1000) > cookieExp;
+    let verified = false;
+    if (verifiedFlag && !isExpired && cookieSig && cookieFp) {
+      const secret = getSigningSecret(env);
+      const tokenData = ip + ':' + cookieExp + ':' + cookieFp;
+      verified = await hmacVerify(secret, tokenData, cookieSig);
+    }
     const cookieFpValidated = normalizeFpHash(cookies[COOKIE_FP_NAME]);
     const fpHash = cookieFpValidated || await deriveRequestFingerprint(request, ip);
     const behaviorRisk = await loadBehaviorRisk(env, fpHash, asn, country);
@@ -521,7 +531,7 @@ export default {
     for (const extraPath of runtimePolicy.extraHoneypotPaths) {
       if (String(extraPath || '').startsWith('/')) instantBanHoneypots.add(String(extraPath));
     }
-    if (runtimePolicy.honeypotEnabled && instantBanHoneypots.has(pathLower)) {
+    if (runtimePolicy.honeypotEnabled && !verified && instantBanHoneypots.has(pathLower)) {
       const penalty = await setPermanentPenalty(env, ip, 'Instant honeypot endpoint: ' + pathLower, baseDetails);
       applyPenaltyToDetails(baseDetails, penalty);
       emitBlockLogs(ctx, env, 'HONEYPOT', 'Instant-ban honeypot triggered: ' + pathLower, baseDetails, signals, fpHash, ip, asn);
@@ -535,7 +545,11 @@ export default {
     const honeypotPaths = runtimePolicy.honeypotEnabled
       ? [...new Set([...(LISTS.honeypot_paths || []), ...(runtimePolicy.extraHoneypotPaths || [])])]
       : [];
-    if (runtimePolicy.honeypotEnabled && honeypotPaths.some(p => pathLower === p || pathLower.startsWith(p + '/'))) {
+    const ignoredHoneypotPaths = new Set(['/test']);
+    const effectiveHoneypotPaths = honeypotPaths
+      .map((p) => String(p || '').toLowerCase().trim())
+      .filter((p) => p.startsWith('/') && !ignoredHoneypotPaths.has(p));
+    if (runtimePolicy.honeypotEnabled && !verified && effectiveHoneypotPaths.some(p => pathLower === p || pathLower.startsWith(p + '/'))) {
       const penalty = await escalateIpPenalty(env, ip, 'Honeypot path: ' + url.pathname, baseDetails);
       applyPenaltyToDetails(baseDetails, penalty);
       emitBlockLogs(ctx, env, 'HONEYPOT', 'Honeypot triggered: ' + url.pathname, baseDetails, signals, fpHash, ip, asn);
@@ -1032,7 +1046,7 @@ export default {
 
       ctx.waitUntil(storeBehaviorProfile(env, { event: 'PASSED', fpHash: safeFp, ip, asn, country }));
       ctx.waitUntil(Promise.all([
-        sendDiscordWebhookDelayed(env, 'PASSED', 'Challenge solved (PoW verified)', baseDetails, 3000),
+        sendDiscordWebhookDelayed(env, 'PASSED', 'Challenge Solved', baseDetails, 3000),
         logToD1(env, 'PASSED', 'PoW verified', baseDetails),
         incrementKvStat(env, 'passed'),
         incrementKvStat(env, 'total'),
@@ -1054,9 +1068,9 @@ export default {
 
     // ── IP Reputation auto-block ──
     if (ipReputation.autoBlock) {
-      const penalty = await escalateIpPenalty(env, ip, 'IP reputation auto-block (score: ' + ipReputation.score + ')', baseDetails);
+      const penalty = await escalateIpPenalty(env, ip, 'IP Rep Auto-Block (score: ' + ipReputation.score + ')', baseDetails);
       applyPenaltyToDetails(baseDetails, penalty);
-      emitBlockLogs(ctx, env, 'HARD_BLOCKED', 'IP reputation auto-block', baseDetails, signals, fpHash, ip, asn);
+      emitBlockLogs(ctx, env, 'HARD_BLOCKED', 'IP Rep Auto-Block', baseDetails, signals, fpHash, ip, asn);
       return new Response(htmlSuspended(host, rayId, 'IP reputation score too high: automated block'), {
         status: 403,
         headers: securityHeaders(new Headers({ 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })),
@@ -1143,18 +1157,7 @@ export default {
     }
 
     // ── Verify existing cookies ──
-    const verifiedFlag = cookies[COOKIE_NAME] === '1';
-    const cookieExp = Number(cookies[COOKIE_EXP_NAME] || 0);
-    const cookieSig = cookies[COOKIE_SIG_NAME] || '';
-    const cookieFp = String(cookies[COOKIE_FP_NAME] || '');
-    const isExpired = cookieExp > 0 && Math.floor(nowMs / 1000) > cookieExp;
-
-    let verified = false;
-    if (verifiedFlag && !isExpired && cookieSig && cookieFp) {
-      const secret = getSigningSecret(env);
-      const tokenData = ip + ':' + cookieExp + ':' + cookieFp;
-      verified = await hmacVerify(secret, tokenData, cookieSig);
-    }
+    // (validated earlier so honeypot checks can safely consider verified sessions)
 
     // ── Challenge Escalation Decision (reuse pre-computed value) ──
     const escalation = baseDetails._escalation;
