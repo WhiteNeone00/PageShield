@@ -86,6 +86,14 @@ function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function threatLevel(score) {
+  const n = clamp(Number(score || 0), 0, 100);
+  if (n >= 85) return 'critical';
+  if (n >= 60) return 'high';
+  if (n >= 30) return 'medium';
+  return 'low';
+}
+
 async function sendDiscordWebhookDelayed(env, eventType, reason, details, ms = 3000) {
   await delay(ms);
   return sendDiscordWebhook(env, eventType, reason, details);
@@ -362,7 +370,7 @@ export default {
     if (earlyBlacklist.blocked) {
       const silentReason = earlyBlacklist.source.includes('permanent')
         ? 'Permanently suspended' : 'IP address suspended';
-      ctx.waitUntil(logToD1(env, 'HARD_BLOCKED', 'Silent re-block (' + earlyBlacklist.source + ')', {
+      const silentDetails = {
         ip, ua, method, host, path: url.pathname + url.search,
         rayId, country: request.cf?.country || 'N/A',
         asOrg: request.cf?.asOrganization || 'N/A',
@@ -371,7 +379,17 @@ export default {
         tlsVersion: request.cf?.tlsVersion || 'N/A',
         httpVersion: request.cf?.httpProtocol || 'N/A',
         threatScore: 100,
-      }));
+        _riskLevel: 'critical',
+        _escalation: 'block',
+        _blacklistSource: earlyBlacklist.source,
+      };
+      ctx.waitUntil(Promise.all([
+        logToD1(env, 'HARD_BLOCKED', 'Silent re-block (' + earlyBlacklist.source + ')', silentDetails),
+        incrementKvStat(env, 'blocked'),
+        incrementKvStat(env, 'total'),
+        trackAttackMemory(env, ip, 'HARD_BLOCKED', 'Silent re-block (' + earlyBlacklist.source + ')'),
+        updateThreatIntel(env, silentDetails, true),
+      ]));
       return new Response(htmlSuspended(host, rayId, silentReason), {
         status: 403,
         headers: securityHeaders(new Headers({
@@ -442,6 +460,7 @@ export default {
       host, path: url.pathname + url.search,
       rayId, country, asOrg, asn, colo, utcTime,
       tlsVersion, httpVersion, threatScore, fpHash,
+      _riskLevel: threatLevel(threatScore),
       _suspicious: suspicious, _headless: headless,
       _vpn: runtimeVpnProxy, _aiCrawler: aiCrawler,
       _ddosSuspect: ddosSuspect, _clientType: clientType,
@@ -519,7 +538,7 @@ export default {
     if (attackMemory && Number(attackMemory.count || 0) >= 25 && (Date.now() - Number(attackMemory.last || 0)) < 24 * 3600 * 1000) {
       const penalty = await setPermanentPenalty(env, ip, 'Persistent offender auto-block from attack memory', baseDetails);
       applyPenaltyToDetails(baseDetails, penalty);
-      emitBlockLogs(ctx, env, 'HARD_BLOCKED', 'Persistent offender auto-block', baseDetails, signals, fpHash, ip, asn);
+      emitBlockLogs(ctx, env, 'HARD_BLOCKED', 'Abusive Blocked', baseDetails, signals, fpHash, ip, asn);
       return new Response(htmlSuspended(host, rayId, 'Persistent abusive activity detected'), {
         status: 403,
         headers: securityHeaders(new Headers({ 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })),
@@ -1063,8 +1082,8 @@ export default {
             : baseDetails._verifyMalformed ? 'verify_malformed'
             : 'pow_unknown');
         const failReason = baseDetails._vpnRejected
-          ? 'VPN/Proxy verification denied [' + failCode + ']'
-          : 'PoW validation failed [' + failCode + ']';
+          ? 'VPN/Proxy  denied [' + failCode + ']'
+          : 'Validation failed [' + failCode + ']';
         const failEventType = baseDetails._vpnRejected ? 'VPN_BLOCKED' : 'FAILED';
         const failStatKey = baseDetails._vpnRejected ? 'blocked' : 'failed';
         ctx.waitUntil(Promise.all([
@@ -1141,7 +1160,18 @@ export default {
     const blacklistStatus = await getIpBlacklistStatus(env, ip);
     if (blacklistStatus.blocked) {
       applyPenaltyToDetails(baseDetails, blacklistStatus.penalty);
-      ctx.waitUntil(logToD1(env, 'HARD_BLOCKED', 'IP Blacklisted (' + blacklistStatus.source + ')', baseDetails));
+      baseDetails._blacklistSource = blacklistStatus.source;
+      baseDetails._escalation = 'block';
+      baseDetails._riskLevel = 'critical';
+      baseDetails.threatScore = Math.max(95, Number(baseDetails.threatScore || 0));
+      ctx.waitUntil(Promise.all([
+        logToD1(env, 'HARD_BLOCKED', 'IP Blacklisted (' + blacklistStatus.source + ')', baseDetails),
+        incrementKvStat(env, 'blocked'),
+        incrementKvStat(env, 'total'),
+        storeBehaviorProfile(env, { event: 'HARD_BLOCKED', fpHash, ip, asn, country }),
+        trackAttackMemory(env, ip, 'HARD_BLOCKED', 'IP Blacklisted (' + blacklistStatus.source + ')'),
+        updateThreatIntel(env, baseDetails, true),
+      ]));
       const reason = blacklistStatus.source.includes('permanent') ? 'Permanently suspended' : 'IP address suspended';
       return new Response(htmlSuspended(host, rayId, reason), {
         status: 403,
@@ -1356,7 +1386,16 @@ export default {
     }
 
     // ── Passed — proxy to origin ──
-    ctx.waitUntil(incrementKvStat(env, 'total'));
+    ctx.waitUntil(Promise.all([
+      incrementKvStat(env, 'total'),
+      incrementKvStat(env, 'passed'),
+      storeBehaviorProfile(env, { event: 'PASSED', fpHash, ip, asn, country }),
+      updateThreatIntel(env, {
+        ...baseDetails,
+        _decision: 'allow',
+        _passedVia: verified ? 'verified_session' : 'allow_path',
+      }, false),
+    ]));
     return proxyWithMaintenanceFallback(request, 'passed_origin_proxy');
    } catch (fatalErr) {
     const minDetails = {

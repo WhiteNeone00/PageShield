@@ -10,6 +10,147 @@ import { LISTS } from './engine.lists.js';
 import { dynamicIpBlacklist } from './engine.blacklist.js';
 import { isSpam, isHardBlocked, isFpSpam, isFpHardBlocked, detectTrafficBurst, getHeaderPresenceScore, analyzeRequestPattern } from './engine.traffic.js';
 
+const AI_CRAWLER_FALLBACK = [
+  'gptbot', 'chatgpt-user', 'chatgpt-image', 'oai-searchbot', 'openai-search',
+  'claudebot', 'anthropic-ai', 'perplexitybot', 'cohere-ai', 'cohere-training-data-crawler',
+  'bytespider', 'bytspider', 'ccbot', 'diffbot', 'imagesiftbot', 'duckassistbot',
+  'google-extended', 'googleother', 'googleother-image', 'googleother-video',
+  'applebot-extended', 'meta-externalagent', 'facebookbot', 'amazonbot',
+  'omgilibot', 'petalbot', 'youbot', 'seekr', 'exa', 'you.com', 'phindbot',
+  'timpibot', 'andibot',
+];
+
+const DATACENTER_ORG_HINTS = [
+  'amazon', 'aws', 'google cloud', 'google llc', 'microsoft', 'azure', 'oracle',
+  'oracle cloud', 'alibaba cloud', 'tencent cloud', 'ibm cloud', 'cloudflare', 'edge',
+  'akamai', 'fastly', 'edgecast', 'cdn77', 'stackpath', 'bunny', 'leaseweb', 'ovh',
+  'hetzner', 'contabo', 'digitalocean', 'linode', 'akamai connected cloud', 'choopa',
+  'vultr', 'hivelocity', 'kamatera', 'm247', 'psychz', 'colo', 'data center',
+  'hostwinds', 'netcup', 'ionos', 'online sas', 'scaleway', 'racknerd', 'quadranet',
+  'zenlayer', 'colocrossing', 'gcore', 'mevspace', 'servermania', 'nocix',
+];
+
+const SCANNER_UA_REGEX = /\b(sqlmap|nmap|masscan|zgrab|nikto|nessus|openvas|acunetix|nuclei|dirbuster|gobuster|ffuf|feroxbuster|wpscan|whatweb|metasploit|amass|naabu|httpx|jaeles|wapiti|arachni|gospider|dirsearch)\b/;
+const SCANNER_PATH_REGEX = /\/(?:\.env|\.git|phpmyadmin|wp-admin|wp-login\.php|xmlrpc\.php|vendor\/phpunit|cgi-bin|server-status|actuator|hudson|jenkins|boaform\/admin\/formlogin|manager\/html|autodiscover\/autodiscover\.xml|adminer\.php|solr\/admin|\.vscode|\.idea|\.svn|\.hg|owa\/auth\/logon\.aspx|_ignition\/execute-solution|HNAP1)\b/i;
+const INJECTION_PATTERN_REGEX = /(\$\{jndi:|union(?:\+|\s)select|<script|%3cscript|\.\.\/|%2e%2e%2f|php:\/\/|file:\/\/|proc\/self\/environ|cmd=|exec=|powershell|base64_)/i;
+const LEARN_TTL_MS = 6 * 60 * 60 * 1000;
+const LEARN_MIN_HITS = 2;
+const UA_STOP_TOKENS = new Set([
+  'mozilla', 'applewebkit', 'chrome', 'safari', 'firefox', 'edg', 'gecko',
+  'khtml', 'like', 'version', 'mobile', 'linux', 'windows', 'android',
+  'iphone', 'ipad', 'macintosh', 'x64', 'x86_64', 'compatible', 'wow64',
+]);
+
+const LEARNED = {
+  aiUa: new Map(),
+  botUa: new Map(),
+  scannerUa: new Map(),
+  vpnOrg: new Map(),
+  dcOrg: new Map(),
+};
+
+function pruneExpired(map, nowMs) {
+  for (const [token, entry] of map.entries()) {
+    if (!entry || Number(entry.expiresAt || 0) <= nowMs) map.delete(token);
+  }
+}
+
+function bumpLearned(map, token, nowMs, weight = 1) {
+  if (!token) return;
+  const prev = map.get(token) || { hits: 0, score: 0, expiresAt: nowMs + LEARN_TTL_MS };
+  map.set(token, {
+    hits: Number(prev.hits || 0) + 1,
+    score: Number(prev.score || 0) + Math.max(1, Number(weight || 1)),
+    expiresAt: nowMs + LEARN_TTL_MS,
+  });
+}
+
+function hasLearnedMatch(map, text, nowMs, minHits = LEARN_MIN_HITS, minScore = 3) {
+  if (!text) return false;
+  pruneExpired(map, nowMs);
+  for (const [token, entry] of map.entries()) {
+    if (!token || !entry) continue;
+    if (Number(entry.hits || 0) < minHits) continue;
+    if (Number(entry.score || 0) < minScore) continue;
+    if (text.includes(token)) return true;
+  }
+  return false;
+}
+
+function extractUaTokens(ua) {
+  if (!ua) return [];
+  return ua
+    .split(/[^a-z0-9._-]+/g)
+    .map((t) => t.trim())
+    .filter((t) => t.length >= 4 && t.length <= 40 && !UA_STOP_TOKENS.has(t));
+}
+
+function extractOrgTokens(org) {
+  if (!org) return [];
+  return org
+    .split(/[^a-z0-9]+/g)
+    .map((t) => t.trim())
+    .filter((t) => t.length >= 4 && t.length <= 28 && t !== 'cloud' && t !== 'group');
+}
+
+function hasForwardProxyHeaders(request) {
+  const forwarded = String(request.headers.get('forwarded') || '').toLowerCase();
+  const via = String(request.headers.get('via') || '').toLowerCase();
+  const xff = String(request.headers.get('x-forwarded-for') || '').toLowerCase();
+
+  // In a CF Worker context, Cloudflare itself adds x-forwarded-for (single IP),
+  // true-client-ip, and forwarded headers. Only flag genuine multi-hop proxy chains.
+
+  // Multiple "for=" entries in Forwarded header → real proxy chain
+  if (forwarded && (forwarded.match(/for=/g) || []).length >= 2) return true;
+
+  // Via header from a non-Cloudflare proxy
+  if (via && !via.includes('cloudflare') && !via.includes('1.1 vegur')) return true;
+
+  // XFF with 3+ IPs indicates client → proxy → proxy → Cloudflare
+  if (xff) {
+    const ips = xff.split(',').map(s => s.trim()).filter(Boolean);
+    if (ips.length >= 3) return true;
+  }
+
+  return false;
+}
+
+function rememberEmergingSignatures(request, signals, nowMs) {
+  const ua = String(request.headers.get('user-agent') || '').toLowerCase();
+  const org = String(request.cf?.asOrganization || '').toLowerCase();
+  const attackFlags = Array.isArray(signals.attackFlags) ? signals.attackFlags : [];
+
+  const uaTokens = extractUaTokens(ua);
+  const orgTokens = extractOrgTokens(org);
+
+  if (signals.aiCrawler || Number(signals.aiSignalScore || 0) >= 45) {
+    for (const token of uaTokens) bumpLearned(LEARNED.aiUa, token, nowMs, 2);
+  }
+
+  if (signals.headless || signals.ddosSuspect || Number(signals.botSignalScore || 0) >= 35 || signals.suspicious) {
+    for (const token of uaTokens) bumpLearned(LEARNED.botUa, token, nowMs, 1);
+  }
+
+  if (
+    Number(signals.scannerSignalScore || 0) >= 35
+    || attackFlags.includes('SCANNER_UA')
+    || attackFlags.includes('SCANNER_PATH')
+    || attackFlags.includes('INJECTION_PROBE')
+    || attackFlags.includes('RECON_SCAN')
+  ) {
+    for (const token of uaTokens) bumpLearned(LEARNED.scannerUa, token, nowMs, 2);
+  }
+
+  if (signals.vpn) {
+    for (const token of orgTokens) bumpLearned(LEARNED.vpnOrg, token, nowMs, 2);
+  }
+
+  if (signals.datacenterAutomation || signals.vpn || signals.ddosSuspect) {
+    for (const token of orgTokens) bumpLearned(LEARNED.dcOrg, token, nowMs, 1);
+  }
+}
+
 // ─── Bot / Headless / VPN / AI Detection ─────────────────────────
 export function isSuspicious(request) {
   const ua = (request.headers.get('user-agent') || '').toLowerCase();
@@ -25,6 +166,19 @@ export function isSuspicious(request) {
   return false;
 }
 
+function automationUaFallback(ua) {
+  const hints = [
+    'curl/', 'wget/', 'python-requests', 'python-httpx', 'aiohttp', 'go-http-client',
+    'okhttp', 'java/', 'libwww-perl', 'httpclient', 'axios/', 'node-fetch', 'python-urllib',
+    'scrapy', 'mechanize', 'restsharp', 'resty',
+    'headlesschrome', 'phantomjs', 'selenium', 'playwright', 'puppeteer',
+    'zgrab', 'masscan', 'nmap', 'sqlmap', 'nikto', 'nessus', 'openvas',
+    'acunetix', 'nuclei', 'dirbuster', 'gobuster', 'ffuf', 'feroxbuster',
+    'wpscan', 'whatweb', 'httpx', 'jaeles', 'metasploit', 'naabu', 'amass', 'dirsearch',
+  ];
+  return hints.some((hint) => ua.includes(hint));
+}
+
 export function isHeadless(request) {
   const ua = (request.headers.get('user-agent') || '').toLowerCase();
   if (LISTS.headless_hints.some((p) => ua.includes(p))) return true;
@@ -34,38 +188,157 @@ export function isHeadless(request) {
   return false;
 }
 
-export function isVpnProxy(request) {
+export function isVpnProxy(request, nowMs = Date.now()) {
   const org = (request.cf?.asOrganization || '').toLowerCase();
-  if (!org) return false;
-  return LISTS.vpn_asn_hints.some((h) => org.includes(h));
+  const city = (request.cf?.city || '').toLowerCase();
+  if (!org && !city) return hasForwardProxyHeaders(request);
+
+  if (LISTS.vpn_asn_hints.some((h) => org.includes(h))) return true;
+  if (hasLearnedMatch(LEARNED.vpnOrg, org, nowMs, 2, 3)) return true;
+  if (hasLearnedMatch(LEARNED.dcOrg, org, nowMs, 3, 4) && hasForwardProxyHeaders(request)) return true;
+  // Only flag as VPN/proxy if ASN actually matches known patterns — don't catch-all
+  return false;
 }
 
-function isLikelyDatacenterAutomation(request) {
+function isLikelyDatacenterAutomation(request, nowMs = Date.now()) {
   const org = String(request.cf?.asOrganization || '').toLowerCase();
   if (!org) return false;
 
-  const dcHints = [
-    'skyway west', 'digitalocean', 'linode', 'hetzner', 'ovh', 'contabo', 'leaseweb',
-    'choopa', 'vultr', 'hivelocity', 'amazon', 'aws', 'google cloud', 'microsoft',
-    'azure', 'oracle cloud', 'alibaba cloud', 'tencent cloud', 'data center', 'colo',
-  ];
-  const isDcAsn = dcHints.some((hint) => org.includes(hint));
+  const isDcAsn = DATACENTER_ORG_HINTS.some((hint) => org.includes(hint)) || hasLearnedMatch(LEARNED.dcOrg, org, nowMs, 2, 3);
   if (!isDcAsn) return false;
 
   const ua = String(request.headers.get('user-agent') || '').toLowerCase();
+  const method = String(request.method || 'GET').toUpperCase();
   const hasBrowserUa = /\b(mozilla|chrome|safari|firefox|edg|opera)\b/.test(ua);
   const hasSecFetchMode = !!request.headers.get('sec-fetch-mode');
   const hasSecChUa = !!request.headers.get('sec-ch-ua');
   const hasAcceptLang = !!request.headers.get('accept-language');
 
+  if (automationUaFallback(ua)) return true;
   if (!hasBrowserUa) return true;
+  if (['TRACE', 'TRACK', 'DEBUG', 'CONNECT'].includes(method)) return true;
   if (!hasSecFetchMode || !hasSecChUa || !hasAcceptLang) return true;
   return false;
 }
 
-export function isAiCrawler(request) {
+export function isAiCrawler(request, nowMs = Date.now()) {
   const ua = (request.headers.get('user-agent') || '').toLowerCase();
-  return LISTS.ai_crawler_patterns.some((p) => ua.includes(p));
+  if (LISTS.ai_crawler_patterns.some((p) => ua.includes(p))) return true;
+  if (hasLearnedMatch(LEARNED.aiUa, ua, nowMs, 2, 4)) return true;
+  return AI_CRAWLER_FALLBACK.some((p) => ua.includes(p));
+}
+
+function evaluateScannerHeuristics(request) {
+  const ua = String(request.headers.get('user-agent') || '').toLowerCase();
+  const url = new URL(request.url);
+  const fullPath = decodeURIComponent(url.pathname + url.search).toLowerCase();
+  const hasScannerUa = SCANNER_UA_REGEX.test(ua);
+  const scannerPath = SCANNER_PATH_REGEX.test(fullPath);
+  const injectionLike = INJECTION_PATTERN_REGEX.test(fullPath);
+  const queryCount = Array.from(url.searchParams.keys()).length;
+
+  let score = 0;
+  if (hasScannerUa) score += 45;
+  if (scannerPath) score += 30;
+  if (injectionLike) score += 25;
+  if (queryCount >= 18) score += 12;
+
+  return {
+    scannerHeuristicScore: score,
+    hasScannerUa,
+    scannerPath,
+    injectionLike,
+  };
+}
+
+function evaluateAutomationSignals(request, headerPresenceScore) {
+  const ua = String(request.headers.get('user-agent') || '').toLowerCase();
+  const nowMs = Date.now();
+  let botSignalScore = 0;
+  let aiSignalScore = 0;
+  let scannerSignalScore = 0;
+
+  const hasBrowserUa = /\b(mozilla|chrome|safari|firefox|edg|opera)\b/.test(ua);
+  const hasSecFetchMode = !!request.headers.get('sec-fetch-mode');
+  const hasSecFetchSite = !!request.headers.get('sec-fetch-site');
+  const hasSecChUa = !!request.headers.get('sec-ch-ua');
+  const hasAcceptLang = !!request.headers.get('accept-language');
+  const hasReferer = !!request.headers.get('referer');
+  const hasUpgradeInsecure = !!request.headers.get('upgrade-insecure-requests');
+  const path = new URL(request.url).pathname.toLowerCase();
+
+  if (automationUaFallback(ua)) botSignalScore += 35;
+  if (hasLearnedMatch(LEARNED.botUa, ua, nowMs, 2, 4)) botSignalScore += 22;
+  if (!hasBrowserUa) botSignalScore += 10;
+  if (!hasSecFetchMode) botSignalScore += 8;
+  if (!hasSecFetchSite) botSignalScore += 4;
+  if (!hasSecChUa) botSignalScore += 8;
+  if (!hasAcceptLang) botSignalScore += 6;
+  if (!hasReferer) botSignalScore += 3;
+  if (hasBrowserUa && !hasUpgradeInsecure) botSignalScore += 3;
+  if (headerPresenceScore <= 2) botSignalScore += 10;
+  if (headerPresenceScore <= 1) botSignalScore += 8;
+
+  const scannerWord = SCANNER_UA_REGEX.test(ua);
+  if (scannerWord) scannerSignalScore += 45;
+  if (hasLearnedMatch(LEARNED.scannerUa, ua, nowMs, 2, 4)) scannerSignalScore += 25;
+  if (SCANNER_PATH_REGEX.test(path)) scannerSignalScore += 20;
+
+  const crawlerWord = /\b(bot|crawler|spider|scraper|indexer)\b/.test(ua);
+  if (crawlerWord) aiSignalScore += 20;
+  if (/\b(gptbot|claudebot|perplexitybot|bytespider|cohere-ai|ccbot|oai-searchbot|meta-externalagent|google-extended)\b/.test(ua)) aiSignalScore += 45;
+  if ((path === '/robots.txt' || path === '/sitemap.xml') && crawlerWord) aiSignalScore += 15;
+
+  if (/\b(wp-admin|phpmyadmin|\.env|\.git|actuator|hudson|jenkins|server-status|xmlrpc\.php|cgi-bin|adminer\.php)\b/.test(path)) scannerSignalScore += 20;
+
+  return { botSignalScore, aiSignalScore, scannerSignalScore };
+}
+
+function evaluateRequestAnomalies(request) {
+  const ua = String(request.headers.get('user-agent') || '').toLowerCase();
+  const method = String(request.method || 'GET').toUpperCase();
+  const accept = String(request.headers.get('accept') || '').toLowerCase();
+  const contentType = String(request.headers.get('content-type') || '').toLowerCase();
+  const contentLength = Number(request.headers.get('content-length') || 0);
+  const secFetchMode = String(request.headers.get('sec-fetch-mode') || '').toLowerCase();
+  const secFetchSite = String(request.headers.get('sec-fetch-site') || '').toLowerCase();
+  const secChUa = String(request.headers.get('sec-ch-ua') || '').toLowerCase();
+  const acceptLanguage = String(request.headers.get('accept-language') || '').toLowerCase();
+  const xForwardedFor = String(request.headers.get('x-forwarded-for') || '').toLowerCase();
+  const url = new URL(request.url);
+  const path = url.pathname.toLowerCase();
+
+  let anomalyScore = 0;
+  let spoofScore = 0;
+
+  const looksBrowserUa = /\b(mozilla|chrome|safari|firefox|edg|opera)\b/.test(ua);
+  const looksChromeLike = /\b(chrome|edg)\b/.test(ua);
+
+  if (method === 'GET' && contentType) anomalyScore += 6;
+  if ((method === 'POST' || method === 'PUT' || method === 'PATCH') && contentLength > 0 && !contentType) anomalyScore += 10;
+  if (method === 'HEAD' && contentLength > 0) anomalyScore += 8;
+
+  // accept: */* is normal for fetch/XHR — only penalise on navigations (GET without sec-fetch-dest: document)
+  const secFetchDest = String(request.headers.get('sec-fetch-dest') || '').toLowerCase();
+  if (looksBrowserUa && accept === '*/*' && method === 'GET' && secFetchDest === 'document') spoofScore += 6;
+  if (looksBrowserUa && !secFetchMode) spoofScore += 7;
+  if (looksBrowserUa && !secFetchSite) spoofScore += 5;
+  if (looksChromeLike && !secChUa) spoofScore += 9;
+  if (looksBrowserUa && !acceptLanguage) spoofScore += 7;
+  if (!looksBrowserUa && (secFetchMode || secFetchSite || secChUa)) spoofScore += 6;
+  // Only penalise multi-hop proxy chains (3+ IPs), not Cloudflare single-hop
+  if (xForwardedFor) {
+    const xffCount = xForwardedFor.split(',').filter(s => s.trim()).length;
+    if (xffCount >= 3) spoofScore += 5;
+  }
+  if (hasForwardProxyHeaders(request)) spoofScore += 4;
+
+  const crawlerTargetPath = path === '/robots.txt' || path === '/sitemap.xml' || path.startsWith('/wp-json');
+  if (crawlerTargetPath && !looksBrowserUa) anomalyScore += 10;
+  if (Array.from(url.searchParams.keys()).length >= 20) anomalyScore += 12;
+  if (INJECTION_PATTERN_REGEX.test(decodeURIComponent(url.pathname + url.search))) anomalyScore += 15;
+
+  return { anomalyScore, spoofScore };
 }
 
 export function isCountryBlocked(request, env) {
@@ -147,6 +420,7 @@ export function detectAttackPatterns(request) {
   const url = new URL(request.url);
   const fullPath = decodeURIComponent(url.pathname + url.search).toLowerCase();
   const flags = [];
+  const ua = (request.headers.get('user-agent') || '').toLowerCase();
 
   if (LISTS.path_traversal_patterns.some(p => fullPath.includes(p))) flags.push('PATH_TRAVERSAL');
 
@@ -167,6 +441,22 @@ export function detectAttackPatterns(request) {
   if (fullPath.includes('eval(') || fullPath.includes('exec(') || fullPath.includes('system(')) flags.push('CMD_INJECTION');
   if (fullPath.match(/\.(asp|aspx|jsp|cgi|pl)\b/i)) flags.push('LEGACY_SCRIPT');
   if (fullPath.includes('<!--') || fullPath.includes('-->')) flags.push('HTML_COMMENT_INJECT');
+
+  const reconPaths = [
+    '/.env', '/.git/config', '/.git/heads', '/phpmyadmin', '/wp-admin', '/wp-login.php',
+    '/server-status', '/actuator', '/hudson', '/jenkins', '/boaform/admin/formlogin',
+    '/vendor/phpunit', '/xmlrpc.php', '/autodiscover/autodiscover.xml', '/w00tw00t',
+  ];
+  if (reconPaths.some((p) => fullPath === p || fullPath.startsWith(p + '/') || fullPath.includes(p + '?'))) {
+    flags.push('RECON_SCAN');
+  }
+
+  if (SCANNER_UA_REGEX.test(ua)) {
+    flags.push('SCANNER_UA');
+  }
+
+  if (SCANNER_PATH_REGEX.test(fullPath)) flags.push('SCANNER_PATH');
+  if (INJECTION_PATTERN_REGEX.test(fullPath)) flags.push('INJECTION_PROBE');
 
   return flags;
 }
@@ -189,15 +479,23 @@ export function classifyClientType(request, signals) {
   const hasRobotWord = hasRobotSignature(ua);
   const hasCrawlerWord = hasCrawlerSignature(ua);
   const hasBrowserWord = isKnownBrowserUa(ua);
+  const botSignalScore = Number(signals.botSignalScore || 0);
+  const scannerSignalScore = Number(signals.scannerSignalScore || 0);
+  const spoofScore = Number(signals.spoofScore || 0);
+  const attackFlags = Array.isArray(signals.attackFlags) ? signals.attackFlags : [];
 
   if (signals.ddosSuspect) return 'ddos';
   if (signals.aiCrawler) return 'ai-crawler';
+  if (spoofScore >= 18) return 'automation-bot';
   if (signals.headless) return 'automation-bot';
+  if (scannerSignalScore >= 35) return 'bot';
+  if (attackFlags.includes('SCANNER_UA') || attackFlags.includes('SCANNER_PATH')) return 'bot';
+  if (botSignalScore >= 32) return 'bot';
   if (signals.suspicious && hasRobotWord) return 'robot';
   if (signals.suspicious && hasCrawlerWord) return 'crawler';
   if (signals.suspicious) return 'bot';
+  if (hasCrawlerWord || hasRobotWord) return 'crawler';
   if (hasBrowserWord && signals.headerPresenceScore >= 5) return 'user';
-  if (hasCrawlerWord) return 'crawler';
   return 'unknown';
 }
 
@@ -205,11 +503,23 @@ export function classifyClientType(request, signals) {
 export function buildDetectionSignals(request, ip, nowMs, behaviorRisk = {}) {
   const url = new URL(request.url);
   const headerPresenceScore = getHeaderPresenceScore(request);
-  const datacenterAutomation = isLikelyDatacenterAutomation(request);
-  const suspicious = isSuspicious(request) || datacenterAutomation;
+  const automationSignals = evaluateAutomationSignals(request, headerPresenceScore);
+  const requestAnomalies = evaluateRequestAnomalies(request);
+  const scannerHeuristics = evaluateScannerHeuristics(request);
+  const datacenterAutomation = isLikelyDatacenterAutomation(request, nowMs);
+  const suspicious = isSuspicious(request)
+    || datacenterAutomation
+    || (automationSignals.botSignalScore + scannerHeuristics.scannerHeuristicScore * 0.35) >= 30
+    || (automationSignals.scannerSignalScore + scannerHeuristics.scannerHeuristicScore) >= 28
+    || requestAnomalies.spoofScore >= 10
+    || requestAnomalies.anomalyScore >= 13;
   const headless = isHeadless(request);
-  const vpn = isVpnProxy(request) || datacenterAutomation;
-  const aiCrawler = isAiCrawler(request);
+  const vpn = isVpnProxy(request, nowMs) || datacenterAutomation;
+  const aiCrawler = isAiCrawler(request, nowMs)
+    || automationSignals.aiSignalScore >= 35
+    || (automationSignals.aiSignalScore >= 25 && scannerHeuristics.scannerPath)
+    || (automationSignals.aiSignalScore >= 20 && automationSignals.scannerSignalScore >= 20)
+    || requestAnomalies.anomalyScore >= 18;
   const spam = isSpam(ip, nowMs);
   const hardBlocked = isHardBlocked(ip, nowMs);
   const attackFlags = detectAttackPatterns(request);
@@ -223,14 +533,24 @@ export function buildDetectionSignals(request, ip, nowMs, behaviorRisk = {}) {
   const ddosSuspect =
     trafficBurst.ddosSuspect ||
     (spam && headerPresenceScore <= 2) ||
-    (attackFlags.length >= 2 && trafficBurst.prefixBurst);
+    (attackFlags.length >= 2 && trafficBurst.prefixBurst) ||
+    (trafficBurst.prefixBurst && (automationSignals.botSignalScore >= 24 || scannerHeuristics.scannerHeuristicScore >= 25));
 
   const clientType = classifyClientType(request, {
-    suspicious, headless, aiCrawler, ddosSuspect, headerPresenceScore,
+    suspicious,
+    headless,
+    aiCrawler,
+    ddosSuspect,
+    headerPresenceScore,
+    botSignalScore: automationSignals.botSignalScore,
+    scannerSignalScore: automationSignals.scannerSignalScore + scannerHeuristics.scannerHeuristicScore,
+    spoofScore: requestAnomalies.spoofScore,
+    attackFlags,
   });
 
-  return {
+  const result = {
     suspicious, headless, vpn, aiCrawler, spam, hardBlocked,
+    datacenterAutomation,
     attackFlags, headerPresenceScore, ddosSuspect, clientType,
     ipRate: trafficBurst.ipRate,
     prefixRate: trafficBurst.prefixRate,
@@ -245,10 +565,32 @@ export function buildDetectionSignals(request, ip, nowMs, behaviorRisk = {}) {
     tlsSignals: tlsAnalysis.tlsSignals,
     fpSpam,
     fpHardBlocked,
+    botSignalScore: automationSignals.botSignalScore,
+    aiSignalScore: automationSignals.aiSignalScore,
+    scannerSignalScore: automationSignals.scannerSignalScore + scannerHeuristics.scannerHeuristicScore,
+    anomalyScore: requestAnomalies.anomalyScore,
+    spoofScore: requestAnomalies.spoofScore,
+    scannerHeuristicScore: scannerHeuristics.scannerHeuristicScore,
+    scannerPath: scannerHeuristics.scannerPath,
+    injectionLike: scannerHeuristics.injectionLike,
     patternScore: requestPattern.patternScore,
     identicalPathBurst: requestPattern.identicalPathBurst,
     paramEnumeration: requestPattern.paramEnumeration,
   };
+
+  // Learn only from stronger confidence outcomes to avoid noisy poisoning.
+  if (
+    result.ddosSuspect
+    || result.aiCrawler
+    || result.headless
+    || result.scannerSignalScore >= 35
+    || result.attackFlags.length >= 2
+    || result.spoofScore >= 16
+  ) {
+    rememberEmergingSignatures(request, result, nowMs);
+  }
+
+  return result;
 }
 
 // ─── Weighted AI-Like Threat Scoring ─────────────────────────────
@@ -272,6 +614,10 @@ export function computeThreatScore(request, signals) {
     isBotFarm = false, countryAnomaly = false,
     tlsScore = 0, tlsSignals = [],
     fpSpam = false, fpHardBlocked = false,
+    botSignalScore = 0, aiSignalScore = 0,
+    scannerSignalScore = 0,
+    scannerHeuristicScore = 0,
+    anomalyScore = 0, spoofScore = 0,
     identicalPathBurst = false, paramEnumeration = false,
   } = signals || {};
 
@@ -286,6 +632,12 @@ export function computeThreatScore(request, signals) {
   if (headless) behaviorScore += 35;
   if (spam) behaviorScore += 25;
   if (aiCrawler) behaviorScore += 20;
+  behaviorScore += Math.min(25, Math.round(botSignalScore * 0.45));
+  behaviorScore += Math.min(20, Math.round(aiSignalScore * 0.5));
+  behaviorScore += Math.min(24, Math.round(scannerSignalScore * 0.55));
+  behaviorScore += Math.min(18, Math.round(scannerHeuristicScore * 0.35));
+  behaviorScore += Math.min(16, Math.round(anomalyScore * 0.45));
+  behaviorScore += Math.min(18, Math.round(spoofScore * 0.55));
   if (ddosSuspect) behaviorScore += 35;
   if (fpSpam) behaviorScore += 15;
   if (fpHardBlocked) behaviorScore += 20;
@@ -341,6 +693,10 @@ export function computeThreatScore(request, signals) {
   if (attackFlags.includes('SUSPICIOUS_EXT')) attackScore += 10;
   if (attackFlags.includes('LEGACY_SCRIPT')) attackScore += 8;
   if (attackFlags.includes('HTML_COMMENT_INJECT')) attackScore += 10;
+  if (attackFlags.includes('RECON_SCAN')) attackScore += 18;
+  if (attackFlags.includes('SCANNER_UA')) attackScore += 15;
+  if (attackFlags.includes('SCANNER_PATH')) attackScore += 12;
+  if (attackFlags.includes('INJECTION_PROBE')) attackScore += 20;
 
   // ── Pattern Score ──
   patternScore += (signals.patternScore || 0);
