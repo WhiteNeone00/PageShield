@@ -436,14 +436,43 @@ export default {
     const behaviorRisk = await loadBehaviorRisk(env, fpHash, asn, country);
     behaviorRisk._fpHash = fpHash;
     const ipReputation = await loadIpReputation(env, ip);
+
+    if (runtimePolicy.attackBlockEnabled && ipReputation.autoBlock && !isWhitelistedIp(ip)) {
+      const repAutoBlockDetails = {
+        ip, ua, method, referer, acceptLanguage,
+        host, path: url.pathname + url.search,
+        rayId, country, asOrg, asn, colo, utcTime,
+        tlsVersion, httpVersion,
+        threatScore: 95,
+        fpHash,
+        _riskLevel: 'critical',
+        _suspicious: true,
+        _ipRepScore: ipReputation.score,
+        _ipRepTrusted: ipReputation.trusted,
+        _ipRepEvents: ipReputation.events,
+        _ipRepLastEvent: ipReputation.lastEvent,
+        _autoBlockSource: 'ip_reputation',
+        _attackFlags: ['IP_REPUTATION_AUTOBLOCK'],
+      };
+      const penalty = await escalateIpPenalty(env, ip, 'IP reputation auto-block threshold reached', repAutoBlockDetails);
+      applyPenaltyToDetails(repAutoBlockDetails, penalty);
+      emitBlockLogs(ctx, env, 'HARD_BLOCKED', 'IP reputation auto-block threshold reached', repAutoBlockDetails, {}, fpHash, ip, asn);
+      return new Response(htmlSuspended(host, rayId, 'IP reputation threshold exceeded'), {
+        status: 403,
+        headers: securityHeaders(new Headers({ 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })),
+      });
+    }
+
     const trustedAsnOrg = isTrustedAsnOrg(asOrg, env);
     const signals = buildDetectionSignals(request, ip, nowMs, behaviorRisk);
     const {
       suspicious, headless, vpn: vpnProxy, aiCrawler,
       spam, hardBlocked, attackFlags, ddosSuspect,
-      clientType, headerPresenceScore, ipRate, prefixRate, ipPrefix,
+      clientType, headerPresenceScore, ipRate, prefixRate, asnRate, asnBurst, ipPrefix,
       isBotFarm, countryAnomaly, tlsScore, tlsSignals,
       fpSpam, fpHardBlocked, patternScore,
+      authTargetingScore, queryEntropyScore, requestSmugglingSignal,
+      pathSpray, nonGetBurst,
     } = signals;
     const runtimeVpnProxy = vpnProxy || runtimePolicy.extraVpnHints.some((hint) => String(asOrg || '').toLowerCase().includes(hint));
     const baseThreatScore = computeThreatScore(request, signals);
@@ -465,12 +494,17 @@ export default {
       _vpn: runtimeVpnProxy, _aiCrawler: aiCrawler,
       _ddosSuspect: ddosSuspect, _clientType: clientType,
       _headerPresenceScore: headerPresenceScore,
-      _ipRate: ipRate, _prefixRate: prefixRate, _ipPrefix: ipPrefix,
+      _ipRate: ipRate, _prefixRate: prefixRate, _asnRate: asnRate, _asnBurst: asnBurst, _ipPrefix: ipPrefix,
       _spam: spam, _attackFlags: attackFlags,
       _isBotFarm: isBotFarm, _countryAnomaly: countryAnomaly,
       _tlsScore: tlsScore, _tlsSignals: tlsSignals,
       _ipRepScore: ipReputation.score, _ipRepTrusted: ipReputation.trusted,
       _fpSpam: fpSpam, _patternScore: patternScore,
+      _authTargetingScore: authTargetingScore,
+      _queryEntropyScore: queryEntropyScore,
+      _requestSmugglingSignal: requestSmugglingSignal,
+      _pathSpray: pathSpray,
+      _nonGetBurst: nonGetBurst,
       _baseThreatScore: baseThreatScore,
       _ipRepInfluence: ipRepInfluence,
       _trustedAsnOrg: trustedAsnOrg,

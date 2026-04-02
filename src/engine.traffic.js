@@ -6,7 +6,7 @@
 
 import {
   SPAM_WINDOW_MS, SPAM_LIMIT, HARD_BLOCK_LIMIT,
-  TRAFFIC_WINDOW_MS, DDOS_IP_THRESHOLD, DDOS_PREFIX_THRESHOLD,
+  TRAFFIC_WINDOW_MS, DDOS_IP_THRESHOLD, DDOS_PREFIX_THRESHOLD, DDOS_ASN_THRESHOLD,
   DDOS_BYTES_PER_REQUEST_EST,
 } from './core.config.js';
 import { getIpPrefix } from './core.utils.js';
@@ -25,6 +25,17 @@ const FP_HARD_LIMIT = 80;
 const PATTERN_WINDOW_MS = 30 * 1000;    // 30 second window
 const IDENTICAL_PATH_THRESHOLD = 10;     // same path 10+ times = suspicious
 const PARAM_ENUM_THRESHOLD = 8;          // 8+ unique query params = param enumeration
+const PATH_SPRAY_THRESHOLD = 22;          // too many unique paths in short window
+const NON_GET_BURST_THRESHOLD = 12;       // high non-GET rate in short window
+
+function cleanupPatternTracking(nowMs) {
+  if (pathTracking.size < 5000) return;
+  for (const [key, state] of pathTracking.entries()) {
+    if (!state || nowMs - Number(state.windowStart || 0) > PATTERN_WINDOW_MS * 3) {
+      pathTracking.delete(key);
+    }
+  }
+}
 
 // ─── IP Rate Limit Detection ─────────────────────────────────────
 export function isSpam(ip, nowMs) {
@@ -68,12 +79,16 @@ export function isFpHardBlocked(fpHash, nowMs) {
 }
 
 // ─── Traffic Burst / DDoS Detection ─────────────────────────────
-export function detectTrafficBurst(ip, nowMs) {
-  const prefix = getIpPrefix(ip);
-  const ipKey = `ip:${ip}`;
+export function detectTrafficBurst(ip, nowMs, asn = '') {
+  const safeIp = ip || 'N/A';
+  const prefix = getIpPrefix(safeIp);
+  const normalizedAsn = String(asn || '').trim();
+  const hasAsn = !!normalizedAsn && normalizedAsn !== 'N/A';
+  const ipKey = `ip:${safeIp}`;
   const prefixKey = `prefix:${prefix}`;
+  const asnKey = hasAsn ? `asn:${normalizedAsn}` : '';
 
-  const keys = [ipKey, prefixKey];
+  const keys = asnKey ? [ipKey, prefixKey, asnKey] : [ipKey, prefixKey];
   const counts = {};
 
   for (const key of keys) {
@@ -90,34 +105,42 @@ export function detectTrafficBurst(ip, nowMs) {
 
   const ipBurst = counts[ipKey] >= DDOS_IP_THRESHOLD;
   const prefixBurst = counts[prefixKey] >= DDOS_PREFIX_THRESHOLD;
+  const asnBurst = asnKey ? counts[asnKey] >= DDOS_ASN_THRESHOLD : false;
 
   return {
     ipBurst,
     prefixBurst,
-    ddosSuspect: ipBurst || prefixBurst,
+    asnBurst,
+    ddosSuspect: ipBurst || prefixBurst || asnBurst,
     ipRate: counts[ipKey],
     prefixRate: counts[prefixKey],
+    asnRate: asnKey ? counts[asnKey] : 0,
+    asn: hasAsn ? normalizedAsn : 'N/A',
     ipPrefix: prefix,
   };
 }
 
 // ─── Request Pattern Analysis ────────────────────────────────────
-export function analyzeRequestPattern(ip, pathname, queryString, nowMs) {
+export function analyzeRequestPattern(ip, pathname, queryString, nowMs, method = 'GET') {
   const key = `pattern:${ip}`;
+  cleanupPatternTracking(nowMs);
   let state = pathTracking.get(key);
 
   if (!state || nowMs - state.windowStart > PATTERN_WINDOW_MS) {
     state = {
       windowStart: nowMs,
       paths: {},         // path → count
+      methods: {},       // method → count
       queryParams: new Set(),
       totalRequests: 0,
     };
     pathTracking.set(key, state);
   }
 
+  const methodKey = String(method || 'GET').toUpperCase();
   state.totalRequests += 1;
   state.paths[pathname] = (state.paths[pathname] || 0) + 1;
+  state.methods[methodKey] = (state.methods[methodKey] || 0) + 1;
 
   // Track unique query parameter names
   if (queryString) {
@@ -137,6 +160,8 @@ export function analyzeRequestPattern(ip, pathname, queryString, nowMs) {
     paramEnumeration: false,
     burstPath: null,
     uniqueParamCount: state.queryParams.size,
+    pathSpray: false,
+    nonGetBurst: false,
     patternScore: 0,
   };
 
@@ -160,6 +185,17 @@ export function analyzeRequestPattern(ip, pathname, queryString, nowMs) {
   const uniquePaths = Object.keys(state.paths).length;
   if (uniquePaths >= 15 && state.totalRequests >= 20) {
     result.patternScore += 10; // scanning/discovery behavior
+  }
+
+  if (uniquePaths >= PATH_SPRAY_THRESHOLD && state.totalRequests >= 30) {
+    result.pathSpray = true;
+    result.patternScore += 14;
+  }
+
+  const nonGetCount = state.totalRequests - Number(state.methods.GET || 0);
+  if (nonGetCount >= NON_GET_BURST_THRESHOLD && (nonGetCount / Math.max(1, state.totalRequests)) >= 0.55) {
+    result.nonGetBurst = true;
+    result.patternScore += 9;
   }
 
   return result;

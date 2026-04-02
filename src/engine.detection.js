@@ -4,7 +4,7 @@
    client classification, challenge escalation
    ═══════════════════════════════════════════════════════════════════ */
 
-import { DDOS_IP_THRESHOLD, DDOS_PREFIX_THRESHOLD } from './core.config.js';
+import { DDOS_IP_THRESHOLD, DDOS_PREFIX_THRESHOLD, DDOS_ASN_THRESHOLD } from './core.config.js';
 import { normalizeIp } from './core.utils.js';
 import { LISTS } from './engine.lists.js';
 import { dynamicIpBlacklist } from './engine.blacklist.js';
@@ -33,6 +33,9 @@ const DATACENTER_ORG_HINTS = [
 const SCANNER_UA_REGEX = /\b(sqlmap|nmap|masscan|zgrab|nikto|nessus|openvas|acunetix|nuclei|dirbuster|gobuster|ffuf|feroxbuster|wpscan|whatweb|metasploit|amass|naabu|httpx|jaeles|wapiti|arachni|gospider|dirsearch)\b/;
 const SCANNER_PATH_REGEX = /\/(?:\.env|\.git|phpmyadmin|wp-admin|wp-login\.php|xmlrpc\.php|vendor\/phpunit|cgi-bin|server-status|actuator|hudson|jenkins|boaform\/admin\/formlogin|manager\/html|autodiscover\/autodiscover\.xml|adminer\.php|solr\/admin|\.vscode|\.idea|\.svn|\.hg|owa\/auth\/logon\.aspx|_ignition\/execute-solution|HNAP1)\b/i;
 const INJECTION_PATTERN_REGEX = /(\$\{jndi:|union(?:\+|\s)select|<script|%3cscript|\.\.\/|%2e%2e%2f|php:\/\/|file:\/\/|proc\/self\/environ|cmd=|exec=|powershell|base64_)/i;
+const SSRF_PATTERN_REGEX = /(localhost|127\.0\.0\.1|0\.0\.0\.0|169\.254\.169\.254|metadata\.google\.internal|\.[a-z0-9-]+\.internal|\.svc(?:\.cluster\.local)?|\[::1\])/i;
+const GRAPHQL_INTROSPECTION_REGEX = /(?:__schema|__type)\s*(?:\{|\()/i;
+const HEADER_INJECTION_REGEX = /(%0d%0a|\r\n)/i;
 const LEARN_TTL_MS = 6 * 60 * 60 * 1000;
 const LEARN_MIN_HITS = 2;
 const UA_STOP_TOKENS = new Set([
@@ -48,6 +51,46 @@ const LEARNED = {
   vpnOrg: new Map(),
   dcOrg: new Map(),
 };
+
+function safeDecode(input) {
+  const value = String(input || '');
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+function shannonEntropy(value) {
+  const text = String(value || '');
+  if (!text) return 0;
+  const counts = new Map();
+  for (const char of text) {
+    counts.set(char, (counts.get(char) || 0) + 1);
+  }
+  let entropy = 0;
+  for (const count of counts.values()) {
+    const p = count / text.length;
+    entropy -= p * Math.log2(p);
+  }
+  return entropy;
+}
+
+function hasJwtNoneAlgorithm(request) {
+  const auth = String(request.headers.get('authorization') || '');
+  if (!auth.toLowerCase().startsWith('bearer ')) return false;
+  const token = auth.slice(7).trim();
+  if (!token || token.split('.').length < 2) return false;
+  const [headerPart] = token.split('.', 1);
+  const normalized = headerPart.replace(/-/g, '+').replace(/_/g, '/');
+  const padLen = (4 - (normalized.length % 4)) % 4;
+  try {
+    const decoded = atob(normalized + '='.repeat(padLen)).toLowerCase();
+    return decoded.includes('"alg":"none"') || decoded.includes('"alg": "none"');
+  } catch {
+    return false;
+  }
+}
 
 function pruneExpired(map, nowMs) {
   for (const [token, entry] of map.entries()) {
@@ -138,6 +181,10 @@ function rememberEmergingSignatures(request, signals, nowMs) {
     || attackFlags.includes('SCANNER_PATH')
     || attackFlags.includes('INJECTION_PROBE')
     || attackFlags.includes('RECON_SCAN')
+    || attackFlags.includes('SSRF_PROBE')
+    || attackFlags.includes('GRAPHQL_INTROSPECTION')
+    || attackFlags.includes('HEADER_INJECTION')
+    || attackFlags.includes('JWT_NONE_ALG')
   ) {
     for (const token of uaTokens) bumpLearned(LEARNED.scannerUa, token, nowMs, 2);
   }
@@ -231,16 +278,28 @@ export function isAiCrawler(request, nowMs = Date.now()) {
 function evaluateScannerHeuristics(request) {
   const ua = String(request.headers.get('user-agent') || '').toLowerCase();
   const url = new URL(request.url);
-  const fullPath = decodeURIComponent(url.pathname + url.search).toLowerCase();
+  const rawPath = url.pathname + url.search;
+  const fullPath = safeDecode(rawPath).toLowerCase();
+  const decodedQuery = safeDecode(url.search).toLowerCase();
   const hasScannerUa = SCANNER_UA_REGEX.test(ua);
   const scannerPath = SCANNER_PATH_REGEX.test(fullPath);
   const injectionLike = INJECTION_PATTERN_REGEX.test(fullPath);
+  const ssrfProbe = /(?:^|[?&](?:url|uri|target|dest|redirect|next|callback|endpoint|proxy)=)/i.test(decodedQuery)
+    && SSRF_PATTERN_REGEX.test(decodedQuery);
+  const graphqlIntrospection = (url.pathname.toLowerCase().includes('/graphql') || decodedQuery.includes('graphql'))
+    && GRAPHQL_INTROSPECTION_REGEX.test(decodedQuery);
+  const headerInjection = HEADER_INJECTION_REGEX.test(rawPath);
+  const encodedTokenCount = (rawPath.match(/%[0-9a-f]{2}/gi) || []).length;
   const queryCount = Array.from(url.searchParams.keys()).length;
 
   let score = 0;
   if (hasScannerUa) score += 45;
   if (scannerPath) score += 30;
   if (injectionLike) score += 25;
+  if (ssrfProbe) score += 24;
+  if (graphqlIntrospection) score += 20;
+  if (headerInjection) score += 22;
+  if (encodedTokenCount >= 14) score += 8;
   if (queryCount >= 18) score += 12;
 
   return {
@@ -248,6 +307,9 @@ function evaluateScannerHeuristics(request) {
     hasScannerUa,
     scannerPath,
     injectionLike,
+    ssrfProbe,
+    graphqlIntrospection,
+    headerInjection,
   };
 }
 
@@ -300,16 +362,22 @@ function evaluateRequestAnomalies(request) {
   const accept = String(request.headers.get('accept') || '').toLowerCase();
   const contentType = String(request.headers.get('content-type') || '').toLowerCase();
   const contentLength = Number(request.headers.get('content-length') || 0);
+  const transferEncoding = String(request.headers.get('transfer-encoding') || '').toLowerCase();
   const secFetchMode = String(request.headers.get('sec-fetch-mode') || '').toLowerCase();
   const secFetchSite = String(request.headers.get('sec-fetch-site') || '').toLowerCase();
   const secChUa = String(request.headers.get('sec-ch-ua') || '').toLowerCase();
   const acceptLanguage = String(request.headers.get('accept-language') || '').toLowerCase();
+  const hasReferer = !!request.headers.get('referer');
   const xForwardedFor = String(request.headers.get('x-forwarded-for') || '').toLowerCase();
   const url = new URL(request.url);
   const path = url.pathname.toLowerCase();
+  const queryRaw = url.search.startsWith('?') ? url.search.slice(1) : url.search;
 
   let anomalyScore = 0;
   let spoofScore = 0;
+  let authTargetingScore = 0;
+  let queryEntropyScore = 0;
+  let requestSmugglingSignal = false;
 
   const looksBrowserUa = /\b(mozilla|chrome|safari|firefox|edg|opera)\b/.test(ua);
   const looksChromeLike = /\b(chrome|edg)\b/.test(ua);
@@ -333,12 +401,41 @@ function evaluateRequestAnomalies(request) {
   }
   if (hasForwardProxyHeaders(request)) spoofScore += 4;
 
+  const hasContentLength = request.headers.has('content-length');
+  const hasTransferEncoding = !!transferEncoding;
+  if (hasContentLength && hasTransferEncoding) {
+    anomalyScore += 18;
+    requestSmugglingSignal = true;
+  }
+  if (hasTransferEncoding && !transferEncoding.includes('chunked')) {
+    anomalyScore += 12;
+    requestSmugglingSignal = true;
+  }
+
   const crawlerTargetPath = path === '/robots.txt' || path === '/sitemap.xml' || path.startsWith('/wp-json');
   if (crawlerTargetPath && !looksBrowserUa) anomalyScore += 10;
   if (Array.from(url.searchParams.keys()).length >= 20) anomalyScore += 12;
-  if (INJECTION_PATTERN_REGEX.test(decodeURIComponent(url.pathname + url.search))) anomalyScore += 15;
+  if (INJECTION_PATTERN_REGEX.test(safeDecode(url.pathname + url.search))) anomalyScore += 15;
 
-  return { anomalyScore, spoofScore };
+  const entropy = shannonEntropy(queryRaw);
+  if (queryRaw.length >= 120 && entropy >= 4.7) {
+    queryEntropyScore += 12;
+  } else if (queryRaw.length >= 80 && entropy >= 4.3) {
+    queryEntropyScore += 8;
+  }
+  anomalyScore += queryEntropyScore;
+
+  const authTargetPath = /\/(login|signin|auth|oauth|token|session|password|reset|verify)\b/i.test(path);
+  if (authTargetPath && ['POST', 'PUT', 'PATCH'].includes(method)) {
+    authTargetingScore += 8;
+    if (!hasReferer) authTargetingScore += 3;
+    if (!acceptLanguage) authTargetingScore += 4;
+    if (!secFetchSite) authTargetingScore += 3;
+    if (contentLength > 0 && contentLength < 20) authTargetingScore += 4;
+  }
+  anomalyScore += Math.min(12, authTargetingScore);
+
+  return { anomalyScore, spoofScore, authTargetingScore, queryEntropyScore, requestSmugglingSignal };
 }
 
 export function isCountryBlocked(request, env) {
@@ -418,13 +515,15 @@ export function analyzeTls(request) {
 // ─── Attack Pattern Detection ────────────────────────────────────
 export function detectAttackPatterns(request) {
   const url = new URL(request.url);
-  const fullPath = decodeURIComponent(url.pathname + url.search).toLowerCase();
+  const rawPath = url.pathname + url.search;
+  const fullPath = safeDecode(rawPath).toLowerCase();
+  const decodedQuery = safeDecode(url.search).toLowerCase();
   const flags = [];
   const ua = (request.headers.get('user-agent') || '').toLowerCase();
 
   if (LISTS.path_traversal_patterns.some(p => fullPath.includes(p))) flags.push('PATH_TRAVERSAL');
 
-  const qs = decodeURIComponent(url.search).toLowerCase();
+  const qs = decodedQuery;
   if (qs && LISTS.sqli_patterns.some(p => qs.includes(p))) flags.push('SQLI');
   if (qs && LISTS.xss_patterns.some(p => qs.includes(p))) flags.push('XSS');
 
@@ -457,6 +556,16 @@ export function detectAttackPatterns(request) {
 
   if (SCANNER_PATH_REGEX.test(fullPath)) flags.push('SCANNER_PATH');
   if (INJECTION_PATTERN_REGEX.test(fullPath)) flags.push('INJECTION_PROBE');
+  if (HEADER_INJECTION_REGEX.test(rawPath)) flags.push('HEADER_INJECTION');
+  if (/(?:^|[?&](?:url|uri|target|dest|redirect|next|callback|endpoint|proxy)=)/i.test(decodedQuery) && SSRF_PATTERN_REGEX.test(decodedQuery)) {
+    flags.push('SSRF_PROBE');
+  }
+  if ((url.pathname.toLowerCase().includes('/graphql') || decodedQuery.includes('graphql')) && GRAPHQL_INTROSPECTION_REGEX.test(decodedQuery)) {
+    flags.push('GRAPHQL_INTROSPECTION');
+  }
+  if (hasJwtNoneAlgorithm(request)) {
+    flags.push('JWT_NONE_ALG');
+  }
 
   return flags;
 }
@@ -502,6 +611,7 @@ export function classifyClientType(request, signals) {
 // ─── Build Detection Signals ─────────────────────────────────────
 export function buildDetectionSignals(request, ip, nowMs, behaviorRisk = {}) {
   const url = new URL(request.url);
+  const asn = String(request.cf?.asn || 'N/A');
   const headerPresenceScore = getHeaderPresenceScore(request);
   const automationSignals = evaluateAutomationSignals(request, headerPresenceScore);
   const requestAnomalies = evaluateRequestAnomalies(request);
@@ -512,29 +622,34 @@ export function buildDetectionSignals(request, ip, nowMs, behaviorRisk = {}) {
     || (automationSignals.botSignalScore + scannerHeuristics.scannerHeuristicScore * 0.35) >= 30
     || (automationSignals.scannerSignalScore + scannerHeuristics.scannerHeuristicScore) >= 28
     || requestAnomalies.spoofScore >= 10
-    || requestAnomalies.anomalyScore >= 13;
+    || requestAnomalies.anomalyScore >= 13
+    || requestAnomalies.requestSmugglingSignal
+    || requestAnomalies.authTargetingScore >= 12
+    || scannerHeuristics.headerInjection;
   const headless = isHeadless(request);
   const vpn = isVpnProxy(request, nowMs) || datacenterAutomation;
   const aiCrawler = isAiCrawler(request, nowMs)
     || automationSignals.aiSignalScore >= 35
     || (automationSignals.aiSignalScore >= 25 && scannerHeuristics.scannerPath)
     || (automationSignals.aiSignalScore >= 20 && automationSignals.scannerSignalScore >= 20)
-    || requestAnomalies.anomalyScore >= 18;
+    || requestAnomalies.anomalyScore >= 18
+    || (scannerHeuristics.graphqlIntrospection && automationSignals.aiSignalScore >= 12);
   const spam = isSpam(ip, nowMs);
   const hardBlocked = isHardBlocked(ip, nowMs);
   const attackFlags = detectAttackPatterns(request);
-  const trafficBurst = detectTrafficBurst(ip, nowMs);
+  const trafficBurst = detectTrafficBurst(ip, nowMs, asn);
   const tlsAnalysis = analyzeTls(request);
   const fpHash = behaviorRisk._fpHash || '';
   const fpSpam = isFpSpam(fpHash, nowMs);
   const fpHardBlocked = isFpHardBlocked(fpHash, nowMs);
-  const requestPattern = analyzeRequestPattern(ip, url.pathname, url.search, nowMs);
+  const requestPattern = analyzeRequestPattern(ip, url.pathname, url.search, nowMs, request.method);
 
   const ddosSuspect =
     trafficBurst.ddosSuspect ||
     (spam && headerPresenceScore <= 2) ||
     (attackFlags.length >= 2 && trafficBurst.prefixBurst) ||
-    (trafficBurst.prefixBurst && (automationSignals.botSignalScore >= 24 || scannerHeuristics.scannerHeuristicScore >= 25));
+    (trafficBurst.prefixBurst && (automationSignals.botSignalScore >= 24 || scannerHeuristics.scannerHeuristicScore >= 25)) ||
+    (trafficBurst.asnBurst && (spam || fpSpam || automationSignals.botSignalScore >= 18));
 
   const clientType = classifyClientType(request, {
     suspicious,
@@ -554,6 +669,8 @@ export function buildDetectionSignals(request, ip, nowMs, behaviorRisk = {}) {
     attackFlags, headerPresenceScore, ddosSuspect, clientType,
     ipRate: trafficBurst.ipRate,
     prefixRate: trafficBurst.prefixRate,
+    asnRate: trafficBurst.asnRate,
+    asnBurst: trafficBurst.asnBurst,
     ipPrefix: trafficBurst.ipPrefix,
     fpRisk: Number(behaviorRisk.fpRisk || 0),
     asnRisk: Number(behaviorRisk.asnRisk || 0),
@@ -573,9 +690,17 @@ export function buildDetectionSignals(request, ip, nowMs, behaviorRisk = {}) {
     scannerHeuristicScore: scannerHeuristics.scannerHeuristicScore,
     scannerPath: scannerHeuristics.scannerPath,
     injectionLike: scannerHeuristics.injectionLike,
+    ssrfProbe: scannerHeuristics.ssrfProbe,
+    graphqlIntrospection: scannerHeuristics.graphqlIntrospection,
+    headerInjection: scannerHeuristics.headerInjection,
+    authTargetingScore: requestAnomalies.authTargetingScore,
+    queryEntropyScore: requestAnomalies.queryEntropyScore,
+    requestSmugglingSignal: requestAnomalies.requestSmugglingSignal,
     patternScore: requestPattern.patternScore,
     identicalPathBurst: requestPattern.identicalPathBurst,
     paramEnumeration: requestPattern.paramEnumeration,
+    pathSpray: requestPattern.pathSpray,
+    nonGetBurst: requestPattern.nonGetBurst,
   };
 
   // Learn only from stronger confidence outcomes to avoid noisy poisoning.
@@ -586,6 +711,9 @@ export function buildDetectionSignals(request, ip, nowMs, behaviorRisk = {}) {
     || result.scannerSignalScore >= 35
     || result.attackFlags.length >= 2
     || result.spoofScore >= 16
+    || result.requestSmugglingSignal
+    || result.authTargetingScore >= 14
+    || result.ssrfProbe
   ) {
     rememberEmergingSignatures(request, result, nowMs);
   }
@@ -609,7 +737,7 @@ export function computeThreatScore(request, signals) {
     spam = false, vpn = false, suspicious = false, headless = false,
     aiCrawler = false, attackFlags = [], ddosSuspect = false,
     headerPresenceScore = 0, clientType = 'unknown',
-    ipRate = 0, prefixRate = 0,
+    ipRate = 0, prefixRate = 0, asnRate = 0, asnBurst = false,
     fpRisk = 0, asnRisk = 0, countryRisk = 0, bypassAttempts = 0,
     isBotFarm = false, countryAnomaly = false,
     tlsScore = 0, tlsSignals = [],
@@ -618,7 +746,10 @@ export function computeThreatScore(request, signals) {
     scannerSignalScore = 0,
     scannerHeuristicScore = 0,
     anomalyScore = 0, spoofScore = 0,
+    authTargetingScore = 0, queryEntropyScore = 0, requestSmugglingSignal = false,
     identicalPathBurst = false, paramEnumeration = false,
+    pathSpray = false, nonGetBurst = false,
+    ssrfProbe = false, graphqlIntrospection = false, headerInjection = false,
   } = signals || {};
 
   // ── UA Score ──
@@ -638,9 +769,13 @@ export function computeThreatScore(request, signals) {
   behaviorScore += Math.min(18, Math.round(scannerHeuristicScore * 0.35));
   behaviorScore += Math.min(16, Math.round(anomalyScore * 0.45));
   behaviorScore += Math.min(18, Math.round(spoofScore * 0.55));
+  behaviorScore += Math.min(14, Math.round(authTargetingScore * 0.8));
+  behaviorScore += Math.min(10, Math.round(queryEntropyScore * 0.7));
   if (ddosSuspect) behaviorScore += 35;
   if (fpSpam) behaviorScore += 15;
   if (fpHardBlocked) behaviorScore += 20;
+  if (requestSmugglingSignal) behaviorScore += 12;
+  if (ssrfProbe) behaviorScore += 10;
   if (!request.headers.get('accept-language')) behaviorScore += 6;
   if (!request.headers.get('accept')) behaviorScore += 6;
   if (!request.headers.get('accept-encoding')) behaviorScore += 4;
@@ -659,7 +794,10 @@ export function computeThreatScore(request, signals) {
   if (vpn) networkScore += 18;
   if (ipRate >= DDOS_IP_THRESHOLD) networkScore += 12;
   if (prefixRate >= DDOS_PREFIX_THRESHOLD) networkScore += 12;
+  if (asnRate >= DDOS_ASN_THRESHOLD) networkScore += 12;
+  if (asnBurst) networkScore += 10;
   networkScore += Math.min(20, tlsScore);
+  if (requestSmugglingSignal) networkScore += 8;
   if (request.cf?.botManagement?.score !== undefined) {
     const botScore = request.cf.botManagement.score;
     if (botScore < 20) networkScore += 25;
@@ -697,11 +835,19 @@ export function computeThreatScore(request, signals) {
   if (attackFlags.includes('SCANNER_UA')) attackScore += 15;
   if (attackFlags.includes('SCANNER_PATH')) attackScore += 12;
   if (attackFlags.includes('INJECTION_PROBE')) attackScore += 20;
+  if (attackFlags.includes('SSRF_PROBE')) attackScore += 32;
+  if (attackFlags.includes('GRAPHQL_INTROSPECTION')) attackScore += 16;
+  if (attackFlags.includes('HEADER_INJECTION')) attackScore += 22;
+  if (attackFlags.includes('JWT_NONE_ALG')) attackScore += 30;
+  if (headerInjection) attackScore += 8;
+  if (graphqlIntrospection) attackScore += 6;
 
   // ── Pattern Score ──
   patternScore += (signals.patternScore || 0);
   if (identicalPathBurst) patternScore += 5;
   if (paramEnumeration) patternScore += 5;
+  if (pathSpray) patternScore += 6;
+  if (nonGetBurst) patternScore += 6;
 
   // ── Weighted combination ──
   // Prioritize behavior + fingerprint/reputation dominance
@@ -721,8 +867,13 @@ export function computeThreatScore(request, signals) {
   if (isBotFarm) finalScore += 15;
   if (attackFlags.length >= 2) finalScore += 10;
   if (ddosSuspect && headless) finalScore += 10;
+  if (requestSmugglingSignal && attackFlags.length > 0) finalScore += 8;
 
-  return Math.min(finalScore, 100);
+  if (request.cf?.botManagement?.verifiedBot && !attackFlags.length && !ddosSuspect && !suspicious) {
+    finalScore -= 22;
+  }
+
+  return Math.max(0, Math.min(finalScore, 100));
 }
 
 // ─── Challenge Escalation ────────────────────────────────────────
@@ -732,9 +883,13 @@ export function determineEscalation(threatScore, signals) {
   if (threatScore >= 85) return 'block';
   if (signals.isBotFarm) return 'block';
   if (signals.fpHardBlocked) return 'block';
+  if (signals.requestSmugglingSignal && (signals.attackFlags || []).length > 0) return 'block';
+  if (signals.spoofScore >= 24 && signals.scannerSignalScore >= 40) return 'block';
 
   // high → PoW challenge (hard difficulty)
   if (threatScore >= 60) return 'pow-hard';
+  if (signals.asnBurst && (signals.spam || signals.fpSpam)) return 'pow-hard';
+  if (signals.authTargetingScore >= 14 && signals.spoofScore >= 12) return 'pow-hard';
 
   // medium → standard PoW challenge
   if (threatScore >= 30) return 'pow';

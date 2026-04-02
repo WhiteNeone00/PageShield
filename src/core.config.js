@@ -20,6 +20,7 @@ export const BLACKLIST_CACHE_TTL = 600;
 export const TRAFFIC_WINDOW_MS = 10 * 1000;
 export const DDOS_IP_THRESHOLD = 80;
 export const DDOS_PREFIX_THRESHOLD = 300;
+export const DDOS_ASN_THRESHOLD = 420;
 export const DDOS_BYTES_PER_REQUEST_EST = 12 * 1024;
 export const CHALLENGE_NONCE_TTL = 120;
 

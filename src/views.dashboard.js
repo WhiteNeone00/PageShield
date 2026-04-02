@@ -3,758 +3,1815 @@ function escapeHtml(value) {
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
+    .replace(/\"/g, '&quot;')
     .replace(/'/g, '&#039;');
-}
-
-function renderServerDashboard(stats, safeHost) {
-  if (!stats) return '';
-  const reqps = Number(stats?.live?.requestsPerSecond || 0).toFixed(2);
-  const blocked24 = Number(stats?.kpi?.blocked24h || 0);
-  const passed24 = Number(stats?.kpi?.passed24h || 0);
-  const topIps = (Array.isArray(stats?.topIps) ? stats.topIps : []).slice(0, 5);
-
-  return `<div class="shell" id="server-dashboard-shell">
-    <aside class="rail">
-      <button class="rail-btn active">🛡️</button>
-      <button class="rail-btn">📊</button>
-      <button class="rail-btn">⚙️</button>
-    </aside>
-    <aside class="sidebar">
-      <div class="brand">RYZEON</div>
-      <div class="brand-sub">Shield Console</div>
-      <div class="host-box">${safeHost}</div>
-      <nav class="menu">
-        <button class="menu-btn active">Overview</button>
-        <button class="menu-btn">Threats</button>
-        <button class="menu-btn">Traffic</button>
-        <button class="menu-btn">Top IPs</button>
-        <button class="menu-btn">Profile</button>
-        <button class="menu-btn">Settings</button>
-      </nav>
-      <div class="side-foot">Version: Shield v3</div>
-    </aside>
-    <main class="main">
-      <div class="wrap">
-        <header class="topbar">
-          <div class="search-wrap"><input class="search" placeholder="Search events, IPs, countries..." disabled></div>
-          <div class="profile-pill"><span class="dot"></span> Admin Session</div>
-        </header>
-        <div class="kpi-grid">
-          <section class="glass-card stat-card"><div class="label">Requests / sec</div><div class="value">${reqps}</div></section>
-          <section class="glass-card stat-card"><div class="label">Blocked (24h)</div><div class="value bad">${blocked24}</div></section>
-          <section class="glass-card stat-card"><div class="label">Passed (24h)</div><div class="value ok">${passed24}</div></section>
-        </div>
-        <section class="glass-card" style="margin-top:12px">
-          <div class="section-title">Top Attacking IPs</div>
-          <div class="list" style="margin-top:10px">
-            ${topIps.length ? topIps.map(r => `<div class="row"><span>${escapeHtml(r.ip || 'N/A')}</span><span>${Number(r.count || 0)} hits</span></div>`).join('') : '<div class="muted">No recent attack data.</div>'}
-          </div>
-        </section>
-      </div>
-    </main>
-  </div>`;
 }
 
 export function htmlShieldStats(host, initialStats = null) {
   const safeHost = escapeHtml(host || 'N/A');
-  const hasInitialStats = !!initialStats;
   const initialStatsJson = JSON.stringify(initialStats || null);
 
   return `<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8"/>
-  <meta name="viewport" content="width=device-width,initial-scale=1"/>
-  <title>Shield Stats — Ryzeon Shield</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Shield Control Center</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@500;700;800&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
   <style>
-    :root{--bg:#050912;--bg2:#091327;--panel:#0b152a;--panel2:#0e1c36;--line:rgba(113,146,216,.2);--line-soft:rgba(113,146,216,.12);--txt:#e8f0ff;--muted:#8ea2c7;--blue:#2f6cff;--blue2:#5a86ff;--ok:#2ddf87;--bad:#ff5f7a;--warn:#ffcb4f}
-    *{box-sizing:border-box}
-    html,body{height:100%}
-    body{margin:0;background:radial-gradient(900px 500px at -5% -5%,rgba(44,92,255,.24),transparent 45%),radial-gradient(700px 380px at 110% 110%,rgba(0,120,255,.18),transparent 46%),linear-gradient(180deg,var(--bg),var(--bg2));color:var(--txt);font-family:Inter,Segoe UI,Arial,sans-serif}
-    .shell{min-height:100vh;display:grid;grid-template-columns:72px 250px 1fr}
-    .rail{background:rgba(7,13,25,.84);border-right:1px solid var(--line-soft);padding:14px 10px;display:flex;flex-direction:column;align-items:center;gap:10px}
-    .rail-btn{width:42px;height:42px;border-radius:12px;border:1px solid var(--line-soft);background:rgba(255,255,255,.02);color:#dbe6ff;cursor:pointer}
-    .rail-btn.active,.rail-btn:hover{border-color:rgba(82,132,255,.55);box-shadow:0 0 0 2px rgba(47,108,255,.16) inset;background:rgba(47,108,255,.18)}
-    .sidebar{background:linear-gradient(180deg,rgba(8,15,30,.94),rgba(6,12,24,.94));border-right:1px solid var(--line-soft);padding:20px 16px;display:flex;flex-direction:column;min-height:100vh}
-    .brand{font-size:2rem;font-weight:900;letter-spacing:.8px}
-    .brand-sub{color:var(--muted);font-size:.84rem;margin-top:2px}
-    .host-box{margin-top:16px;padding:10px;border:1px solid var(--line-soft);border-radius:12px;background:rgba(255,255,255,.02);font-size:.76rem;color:#b8caf1;word-break:break-all}
-    .menu{display:grid;gap:8px;margin-top:14px}
-    .menu-btn{display:flex;align-items:center;gap:8px;padding:10px 12px;border-radius:12px;border:1px solid transparent;background:rgba(255,255,255,.015);color:#cddcff;cursor:pointer;text-align:left;font-weight:600;transition:all .18s ease}
-    .menu-btn:hover,.menu-btn.active{background:linear-gradient(90deg,rgba(47,108,255,.2),rgba(47,108,255,.08));border-color:rgba(72,128,255,.45);transform:translateX(2px)}
-    .side-foot{margin-top:auto;color:var(--muted);font-size:.78rem}
-    .main{min-width:0}
-    .wrap{padding:18px 22px 30px;max-width:1600px;margin:0 auto}
-    .topbar{display:flex;justify-content:space-between;align-items:center;gap:14px;margin-bottom:14px}
-    .search-wrap{flex:1}
-    .search{width:100%;height:46px;border-radius:24px;border:1px solid var(--line-soft);background:rgba(6,12,24,.75);color:var(--txt);padding:0 16px;outline:none}
-    .search:focus{border-color:rgba(87,133,255,.65)}
-    .profile-pill{display:flex;align-items:center;gap:8px;padding:8px 14px;border:1px solid var(--line-soft);border-radius:999px;background:rgba(255,255,255,.02);font-weight:600}
-    .dot{width:8px;height:8px;border-radius:999px;background:var(--ok);box-shadow:0 0 8px var(--ok)}
-    .glass-card{background:linear-gradient(180deg,rgba(13,24,47,.84),rgba(9,18,36,.86));border:1px solid var(--line-soft);border-radius:18px;padding:14px;box-shadow:inset 0 0 0 1px rgba(110,145,220,.06)}
-    .kpi-grid{display:grid;grid-template-columns:repeat(12,1fr);gap:12px}
-    .stat-card{grid-column:span 3;position:relative;overflow:hidden}
-    .stat-card:after{content:'';position:absolute;inset:0;background-image:linear-gradient(transparent 97%,rgba(65,111,204,.12) 100%),linear-gradient(90deg,transparent 97%,rgba(65,111,204,.12) 100%);background-size:24px 24px;opacity:.28;pointer-events:none}
-    .label{color:var(--muted);font-size:.84rem}
-    .value{font-size:1.9rem;font-weight:800;margin-top:8px}
-    .value.ok{color:var(--ok)}
-    .value.bad{color:var(--bad)}
-    .value.warn{color:var(--warn)}
-    .section-title{font-size:1.15rem;font-weight:800;font-style:italic;letter-spacing:.2px}
-    .section-sub{color:var(--muted);font-size:.84rem;margin-top:4px}
-    .split{display:grid;grid-template-columns:1.2fr .8fr;gap:12px;margin-top:12px}
-    .list{display:grid;gap:9px}
-    .row{display:flex;justify-content:space-between;gap:10px;font-size:.92rem}
-    .row .muted{font-size:.85rem}
-    .bar{height:8px;border-radius:999px;background:rgba(255,255,255,.08);overflow:hidden;margin-top:6px}
-    .bar>span{display:block;height:100%;background:linear-gradient(90deg,var(--blue),var(--blue2))}
-    .chip{display:inline-flex;align-items:center;gap:6px;padding:4px 9px;border:1px solid var(--line-soft);border-radius:999px;background:rgba(255,255,255,.03);font-size:.76rem}
-    .top-actions{display:flex;gap:8px;flex-wrap:wrap}
-    .btn{border:1px solid rgba(84,132,255,.5);background:linear-gradient(180deg,rgba(49,104,255,.24),rgba(24,65,166,.22));color:#ecf3ff;padding:9px 13px;border-radius:11px;cursor:pointer;font-weight:600}
-    .btn:hover{filter:brightness(1.1)}
-    .btn.secondary{background:rgba(255,255,255,.02);border-color:var(--line-soft)}
-    .btn.warn{border-color:rgba(255,203,79,.48);background:rgba(255,203,79,.15)}
-    .btn.danger{border-color:rgba(255,95,122,.48);background:rgba(255,95,122,.15)}
-    .tabs-shell{animation:fade .2s ease}
-    @keyframes fade{from{opacity:.4;transform:translateY(4px)}to{opacity:1;transform:translateY(0)}}
-    .heat{display:grid;grid-template-columns:repeat(24,1fr);gap:4px;margin-top:10px}
-    .cell{height:16px;border-radius:4px;background:rgba(255,255,255,.08)}
-    .legend{display:flex;justify-content:space-between;color:var(--muted);font-size:.76rem;margin-top:7px}
-    .mini-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
-    .mini{padding:10px;border-radius:12px;border:1px solid var(--line-soft);background:rgba(255,255,255,.02)}
-    .mini .k{font-size:.78rem;color:var(--muted)}
-    .mini .v{font-size:1.1rem;font-weight:700;margin-top:6px}
-    .switch{display:flex;justify-content:space-between;align-items:center;padding:10px 12px;border:1px solid var(--line-soft);border-radius:12px;background:rgba(255,255,255,.02)}
-    .switch input{accent-color:#4b8dff}
-    .danger-zone{border-color:rgba(255,95,122,.4);background:rgba(255,95,122,.08)}
-    .input{width:100%;padding:11px 12px;border-radius:10px;border:1px solid var(--line-soft);background:rgba(0,0,0,.26);color:var(--txt);outline:none}
-    .input:focus{border-color:rgba(84,132,255,.64)}
-    .muted{color:var(--muted)}
-    .login{max-width:430px;margin:15vh auto 0;background:linear-gradient(180deg,rgba(13,24,47,.92),rgba(9,18,36,.92));border:1px solid var(--line-soft);border-radius:16px;padding:20px}
-    .login-title{font-size:1.3rem;font-weight:800}
-    .err{font-size:.84rem;color:var(--bad);min-height:1.2rem;margin-top:8px}
-    .modal-backdrop{position:fixed;inset:0;background:rgba(4,8,14,.72);display:none;align-items:center;justify-content:center;padding:14px;z-index:80}
-    .modal-backdrop.show{display:flex}
-    .modal{width:min(560px,100%);background:linear-gradient(180deg,#0e1b34,#0a162c);border:1px solid var(--line);border-radius:16px;box-shadow:0 20px 50px rgba(0,0,0,.45)}
-    .modal-head{display:flex;align-items:center;justify-content:space-between;padding:14px 14px 10px;border-bottom:1px solid var(--line-soft)}
-    .modal-title{font-weight:800;font-size:1.1rem}
-    .icon-x{width:32px;height:32px;border:none;background:rgba(255,255,255,.06);border-radius:10px;color:#d9e6ff;cursor:pointer}
-    .modal-body{padding:14px;display:grid;gap:10px}
-    .toast{position:fixed;right:18px;bottom:18px;z-index:90;min-width:270px;max-width:420px;padding:12px 14px;border-radius:12px;border:1px solid var(--line-soft);background:rgba(9,18,34,.95);color:#e8f0ff;opacity:0;pointer-events:none;transform:translateY(8px);transition:all .2s ease}
-    .toast.show{opacity:1;transform:translateY(0)}
-    .toast.ok{border-color:rgba(45,223,135,.45)}
-    .toast.error{border-color:rgba(255,95,122,.55)}
-    canvas{width:100%;height:280px}
-    @media (max-width:1200px){.shell{grid-template-columns:64px 220px 1fr}.stat-card{grid-column:span 6}.split{grid-template-columns:1fr}}
-    @media (max-width:960px){.shell{grid-template-columns:1fr}.rail{display:none}.sidebar{min-height:auto;border-right:none;border-bottom:1px solid var(--line-soft)}.mini-grid{grid-template-columns:1fr}}
+    :root {
+      --bg: #f7f2e8;
+      --bg-soft: #efe5d5;
+      --ink: #1e293b;
+      --ink-soft: #5b6470;
+      --line: #dccdb8;
+      --surface: rgba(255, 255, 255, 0.84);
+      --surface-strong: #fffdf8;
+      --brand: #0f766e;
+      --brand-strong: #0e7490;
+      --accent: #db7c31;
+      --ok: #15803d;
+      --warn: #b45309;
+      --bad: #b91c1c;
+      --radius-lg: 20px;
+      --radius-md: 14px;
+      --radius-sm: 10px;
+      --shadow: 0 20px 44px rgba(72, 49, 19, 0.11);
+      --shadow-soft: 0 10px 24px rgba(72, 49, 19, 0.08);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html,
+    body {
+      height: 100%;
+    }
+
+    body {
+      margin: 0;
+      color: var(--ink);
+      font-family: 'Manrope', 'Segoe UI', sans-serif;
+      background:
+        radial-gradient(840px 520px at -14% -20%, rgba(14, 116, 144, 0.18), transparent 60%),
+        radial-gradient(820px 520px at 112% 126%, rgba(219, 124, 49, 0.15), transparent 60%),
+        linear-gradient(170deg, var(--bg) 0%, var(--bg-soft) 100%);
+      overflow-x: hidden;
+    }
+
+    .atmo {
+      position: fixed;
+      z-index: 0;
+      pointer-events: none;
+      border-radius: 999px;
+      filter: blur(2px);
+      opacity: 0.6;
+    }
+
+    .atmo.a {
+      width: 420px;
+      height: 420px;
+      top: -160px;
+      right: -120px;
+      background: radial-gradient(circle, rgba(15, 118, 110, 0.3) 0%, rgba(15, 118, 110, 0) 72%);
+    }
+
+    .atmo.b {
+      width: 520px;
+      height: 520px;
+      left: -180px;
+      bottom: -200px;
+      background: radial-gradient(circle, rgba(219, 124, 49, 0.24) 0%, rgba(219, 124, 49, 0) 70%);
+    }
+
+    .app-root {
+      position: relative;
+      z-index: 1;
+      min-height: 100vh;
+      padding: 18px;
+    }
+
+    .boot {
+      max-width: 520px;
+      margin: 20vh auto 0;
+      padding: 22px;
+      border-radius: var(--radius-lg);
+      border: 1px solid var(--line);
+      background: var(--surface);
+      backdrop-filter: blur(8px);
+      box-shadow: var(--shadow);
+      font-weight: 700;
+      letter-spacing: 0.2px;
+      color: var(--ink-soft);
+      text-align: center;
+      animation: rise 0.45s ease;
+    }
+
+    .login-shell {
+      min-height: calc(100vh - 36px);
+      display: grid;
+      place-items: center;
+      animation: rise 0.42s ease;
+    }
+
+    .login-card {
+      width: min(520px, 100%);
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: 26px;
+      padding: 28px;
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(10px);
+    }
+
+    .login-kicker {
+      font-size: 0.76rem;
+      font-weight: 700;
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+      color: var(--brand-strong);
+    }
+
+    .login-title {
+      margin-top: 10px;
+      font-family: 'Bricolage Grotesque', sans-serif;
+      font-size: clamp(1.7rem, 3.4vw, 2.4rem);
+      line-height: 1.1;
+      letter-spacing: 0.01em;
+    }
+
+    .host-label {
+      margin-top: 12px;
+      padding: 9px 11px;
+      border-radius: 10px;
+      border: 1px solid var(--line);
+      background: rgba(255, 255, 255, 0.72);
+      color: var(--ink-soft);
+      font-size: 0.86rem;
+      word-break: break-all;
+    }
+
+    .field {
+      width: 100%;
+      border-radius: 12px;
+      border: 1px solid #cfbea8;
+      background: #fffcf5;
+      color: var(--ink);
+      padding: 12px 13px;
+      font: inherit;
+      outline: none;
+      transition: border-color 0.18s ease, box-shadow 0.18s ease;
+    }
+
+    .field:focus {
+      border-color: rgba(14, 116, 144, 0.55);
+      box-shadow: 0 0 0 3px rgba(14, 116, 144, 0.14);
+    }
+
+    .field-row {
+      margin-top: 14px;
+      display: grid;
+      gap: 8px;
+    }
+
+    .label {
+      font-size: 0.82rem;
+      text-transform: uppercase;
+      letter-spacing: 0.09em;
+      color: #6e6d68;
+      font-weight: 700;
+    }
+
+    .btn {
+      border: 1px solid transparent;
+      border-radius: 12px;
+      padding: 10px 13px;
+      font: inherit;
+      font-weight: 700;
+      cursor: pointer;
+      transition: transform 0.16s ease, box-shadow 0.2s ease, filter 0.2s ease;
+    }
+
+    .btn:hover {
+      transform: translateY(-1px);
+      filter: brightness(1.02);
+    }
+
+    .btn:disabled {
+      opacity: 0.65;
+      cursor: not-allowed;
+      transform: none;
+      filter: none;
+    }
+
+    .btn.primary {
+      color: #effdff;
+      border-color: rgba(15, 118, 110, 0.44);
+      background: linear-gradient(155deg, #0f766e 0%, #0e7490 100%);
+      box-shadow: 0 8px 18px rgba(14, 116, 144, 0.24);
+    }
+
+    .btn.ghost {
+      color: var(--ink);
+      border-color: #ccbca6;
+      background: #fffaf1;
+    }
+
+    .btn.warn {
+      color: #7c2d12;
+      border-color: rgba(180, 83, 9, 0.45);
+      background: rgba(251, 191, 36, 0.22);
+    }
+
+    .btn.danger {
+      color: #7f1d1d;
+      border-color: rgba(185, 28, 28, 0.4);
+      background: rgba(248, 113, 113, 0.16);
+    }
+
+    .btns {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .error {
+      margin-top: 10px;
+      min-height: 1.2rem;
+      color: var(--bad);
+      font-size: 0.86rem;
+      font-weight: 600;
+    }
+
+    .shell {
+      min-height: calc(100vh - 36px);
+      display: grid;
+      grid-template-columns: 278px 1fr;
+      gap: 14px;
+      animation: rise 0.35s ease;
+    }
+
+    .sidebar {
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: 24px;
+      padding: 18px 14px 14px;
+      box-shadow: var(--shadow-soft);
+      backdrop-filter: blur(8px);
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+    }
+
+    .brand-kicker {
+      font-size: 0.7rem;
+      text-transform: uppercase;
+      letter-spacing: 0.19em;
+      color: var(--brand-strong);
+      font-weight: 800;
+    }
+
+    .brand {
+      margin-top: 8px;
+      font-family: 'Bricolage Grotesque', sans-serif;
+      font-size: 1.95rem;
+      line-height: 1;
+      letter-spacing: 0.02em;
+    }
+
+    .brand-sub {
+      margin-top: 6px;
+      color: var(--ink-soft);
+      font-size: 0.9rem;
+    }
+
+    .side-host {
+      margin-top: 14px;
+      padding: 10px;
+      border: 1px dashed #cbbba4;
+      border-radius: 10px;
+      background: rgba(255, 255, 255, 0.72);
+      font-size: 0.8rem;
+      color: var(--ink-soft);
+      word-break: break-all;
+    }
+
+    .menu {
+      margin-top: 14px;
+      display: grid;
+      gap: 8px;
+    }
+
+    .menu-btn {
+      border: 1px solid transparent;
+      border-radius: 12px;
+      background: rgba(255, 255, 255, 0.58);
+      color: var(--ink);
+      text-align: left;
+      padding: 10px 11px;
+      font: inherit;
+      font-weight: 700;
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+
+    .menu-btn:hover {
+      border-color: rgba(15, 118, 110, 0.32);
+      transform: translateX(2px);
+    }
+
+    .menu-btn.active {
+      color: #f2ffff;
+      background: linear-gradient(145deg, rgba(15, 118, 110, 0.92), rgba(14, 116, 144, 0.92));
+      border-color: rgba(15, 118, 110, 0.44);
+      box-shadow: 0 10px 20px rgba(14, 116, 144, 0.22);
+    }
+
+    .side-foot {
+      margin-top: auto;
+      font-size: 0.79rem;
+      color: #6c695f;
+      border-top: 1px solid var(--line);
+      padding-top: 10px;
+    }
+
+    .workspace {
+      min-width: 0;
+      display: grid;
+      grid-template-rows: auto 1fr;
+      gap: 10px;
+    }
+
+    .toolbar {
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      padding: 10px;
+      box-shadow: var(--shadow-soft);
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+
+    .toolbar-left {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      border: 1px solid #cdbda7;
+      border-radius: 999px;
+      background: #fffaf1;
+      padding: 7px 12px;
+      font-size: 0.82rem;
+      font-weight: 700;
+      color: #445162;
+      max-width: 100%;
+    }
+
+    .chip .dot {
+      width: 9px;
+      height: 9px;
+      border-radius: 999px;
+      background: #16a34a;
+      box-shadow: 0 0 0 5px rgba(22, 163, 74, 0.16);
+      flex: 0 0 auto;
+    }
+
+    .toolbar-right {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .content {
+      min-width: 0;
+      display: block;
+    }
+
+    .content-pane {
+      animation: panel 0.26s ease both;
+    }
+
+    .hero {
+      margin-bottom: 10px;
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      padding: 14px;
+      box-shadow: var(--shadow-soft);
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .hero h1 {
+      margin: 0;
+      font-family: 'Bricolage Grotesque', sans-serif;
+      font-size: clamp(1.45rem, 2.5vw, 2rem);
+      line-height: 1.1;
+    }
+
+    .hero p {
+      margin: 5px 0 0;
+      color: var(--ink-soft);
+      font-size: 0.9rem;
+    }
+
+    .metrics {
+      display: grid;
+      grid-template-columns: repeat(12, minmax(0, 1fr));
+      gap: 10px;
+    }
+
+    .metric {
+      grid-column: span 3;
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: 15px;
+      padding: 12px;
+      box-shadow: var(--shadow-soft);
+      position: relative;
+      overflow: hidden;
+    }
+
+    .metric::after {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background: linear-gradient(130deg, rgba(255, 255, 255, 0.38), rgba(255, 255, 255, 0));
+      pointer-events: none;
+    }
+
+    .metric .k {
+      font-size: 0.8rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: #626f7d;
+      font-weight: 800;
+    }
+
+    .metric .v {
+      margin-top: 6px;
+      font-family: 'Bricolage Grotesque', sans-serif;
+      font-size: 1.7rem;
+      line-height: 1;
+    }
+
+    .metric .s {
+      margin-top: 6px;
+      color: var(--ink-soft);
+      font-size: 0.83rem;
+      font-weight: 600;
+    }
+
+    .metric.ok .v { color: var(--ok); }
+    .metric.warn .v { color: var(--warn); }
+    .metric.bad .v { color: var(--bad); }
+
+    .grid-two {
+      margin-top: 10px;
+      display: grid;
+      grid-template-columns: 1.2fr 0.8fr;
+      gap: 10px;
+    }
+
+    .panel {
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      padding: 12px;
+      box-shadow: var(--shadow-soft);
+      min-width: 0;
+    }
+
+    .panel-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 10px;
+      flex-wrap: wrap;
+    }
+
+    .panel-title {
+      margin: 0;
+      font-family: 'Bricolage Grotesque', sans-serif;
+      font-size: 1.15rem;
+      line-height: 1.12;
+    }
+
+    .panel-sub {
+      margin: 3px 0 0;
+      color: var(--ink-soft);
+      font-size: 0.84rem;
+    }
+
+    .mini-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 8px;
+    }
+
+    .mini {
+      border: 1px solid #d8c9b4;
+      border-radius: 12px;
+      padding: 10px;
+      background: rgba(255, 255, 255, 0.72);
+      min-width: 0;
+    }
+
+    .mini .k {
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: #646b72;
+      font-weight: 700;
+    }
+
+    .mini .v {
+      margin-top: 5px;
+      font-size: 1.07rem;
+      font-weight: 800;
+      word-break: break-word;
+    }
+
+    .list {
+      display: grid;
+      gap: 8px;
+    }
+
+    .row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 10px;
+      font-size: 0.9rem;
+      min-width: 0;
+    }
+
+    .row > span {
+      min-width: 0;
+      word-break: break-word;
+    }
+
+    .bar {
+      margin-top: 5px;
+      width: 100%;
+      height: 7px;
+      border-radius: 999px;
+      background: #efe2d1;
+      overflow: hidden;
+    }
+
+    .bar span {
+      display: block;
+      height: 100%;
+      background: linear-gradient(90deg, #0f766e, #0ea5a4);
+    }
+
+    .heat {
+      margin-top: 8px;
+      display: grid;
+      grid-template-columns: repeat(24, minmax(0, 1fr));
+      gap: 4px;
+    }
+
+    .cell {
+      height: 17px;
+      border-radius: 5px;
+      border: 1px solid rgba(171, 145, 112, 0.18);
+    }
+
+    .legend {
+      margin-top: 6px;
+      font-size: 0.75rem;
+      color: #6b6f76;
+      display: flex;
+      justify-content: space-between;
+    }
+
+    .table {
+      display: grid;
+      gap: 8px;
+    }
+
+    .table-row {
+      display: grid;
+      grid-template-columns: minmax(120px, 1fr) auto auto;
+      gap: 8px;
+      align-items: center;
+      border: 1px solid #d8c9b4;
+      border-radius: 12px;
+      background: rgba(255, 255, 255, 0.74);
+      padding: 9px;
+    }
+
+    .table-row .mono {
+      font-family: 'ui-monospace', SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace;
+      font-size: 0.84rem;
+      color: #0f172a;
+      word-break: break-all;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      border-radius: 999px;
+      padding: 4px 8px;
+      font-size: 0.74rem;
+      font-weight: 800;
+      border: 1px solid #d1c0a8;
+      background: rgba(255, 255, 255, 0.64);
+      color: #4a5563;
+      white-space: nowrap;
+    }
+
+    .badge.good {
+      color: #166534;
+      border-color: rgba(21, 128, 61, 0.36);
+      background: rgba(34, 197, 94, 0.16);
+    }
+
+    .badge.off {
+      color: #7f1d1d;
+      border-color: rgba(185, 28, 28, 0.36);
+      background: rgba(248, 113, 113, 0.16);
+    }
+
+    .site-grid {
+      display: grid;
+      gap: 8px;
+    }
+
+    .site-card {
+      border: 1px solid #d8c9b4;
+      border-radius: 14px;
+      padding: 10px;
+      background: rgba(255, 255, 255, 0.72);
+    }
+
+    .site-card .domain {
+      font-weight: 800;
+      letter-spacing: 0.01em;
+      word-break: break-all;
+    }
+
+    .site-card .meta {
+      margin-top: 6px;
+      font-size: 0.82rem;
+      color: #5f6774;
+      word-break: break-word;
+    }
+
+    .switch-list {
+      display: grid;
+      gap: 8px;
+      margin-top: 8px;
+    }
+
+    .switch {
+      border: 1px solid #d9c9b5;
+      border-radius: 12px;
+      padding: 10px;
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 8px;
+      align-items: center;
+      background: rgba(255, 255, 255, 0.73);
+    }
+
+    .switch .name {
+      font-weight: 700;
+      color: #223042;
+    }
+
+    .switch .desc {
+      margin-top: 3px;
+      font-size: 0.81rem;
+      color: #636c77;
+    }
+
+    .switch input {
+      width: 20px;
+      height: 20px;
+      accent-color: #0f766e;
+      cursor: pointer;
+      margin: 0;
+    }
+
+    .danger-zone {
+      border-color: rgba(185, 28, 28, 0.28);
+      background: rgba(255, 228, 228, 0.64);
+    }
+
+    .muted {
+      color: var(--ink-soft);
+    }
+
+    .empty {
+      font-size: 0.88rem;
+      color: #66717f;
+      padding: 8px;
+      border: 1px dashed #d4c6b3;
+      border-radius: 10px;
+      background: rgba(255, 255, 255, 0.62);
+    }
+
+    .chart-wrap {
+      position: relative;
+      width: 100%;
+      height: 300px;
+    }
+
+    canvas {
+      width: 100%;
+      height: 100%;
+    }
+
+    .modal-backdrop {
+      position: fixed;
+      inset: 0;
+      z-index: 90;
+      padding: 16px;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      background: rgba(32, 28, 20, 0.45);
+      backdrop-filter: blur(2px);
+    }
+
+    .modal-backdrop.show {
+      display: flex;
+      animation: fade 0.2s ease;
+    }
+
+    .modal {
+      width: min(620px, 100%);
+      border-radius: 20px;
+      border: 1px solid #d5c6b0;
+      background: #fffdf9;
+      box-shadow: var(--shadow);
+      overflow: hidden;
+      animation: rise 0.24s ease;
+    }
+
+    .modal-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 12px 14px;
+      border-bottom: 1px solid #dfd0bb;
+      background: linear-gradient(140deg, rgba(15, 118, 110, 0.11), rgba(14, 116, 144, 0.09));
+    }
+
+    .modal-title {
+      font-family: 'Bricolage Grotesque', sans-serif;
+      font-size: 1.18rem;
+    }
+
+    .icon-btn {
+      border: 1px solid #d2c1ab;
+      background: #fff7ea;
+      width: 34px;
+      height: 34px;
+      border-radius: 10px;
+      cursor: pointer;
+      font-size: 1rem;
+      color: #494640;
+    }
+
+    .modal-body {
+      padding: 14px;
+      display: grid;
+      gap: 9px;
+    }
+
+    .toast {
+      position: fixed;
+      z-index: 95;
+      right: 16px;
+      bottom: 16px;
+      min-width: 240px;
+      max-width: 420px;
+      border-radius: 12px;
+      border: 1px solid #d8c8b3;
+      background: rgba(255, 254, 250, 0.96);
+      box-shadow: var(--shadow-soft);
+      padding: 10px 12px;
+      opacity: 0;
+      transform: translateY(8px);
+      pointer-events: none;
+      transition: all 0.2s ease;
+      color: #2f3a4a;
+      font-weight: 700;
+    }
+
+    .toast.show {
+      opacity: 1;
+      transform: translateY(0);
+    }
+
+    .toast.ok {
+      border-color: rgba(21, 128, 61, 0.38);
+      background: rgba(240, 253, 244, 0.96);
+      color: #166534;
+    }
+
+    .toast.error {
+      border-color: rgba(185, 28, 28, 0.4);
+      background: rgba(254, 242, 242, 0.96);
+      color: #991b1b;
+    }
+
+    @keyframes panel {
+      from {
+        opacity: 0.36;
+        transform: translateY(7px);
+      }
+      to {
+        opacity: 1;
+        transform: translateY(0);
+      }
+    }
+
+    @keyframes rise {
+      from {
+        opacity: 0;
+        transform: translateY(10px);
+      }
+      to {
+        opacity: 1;
+        transform: translateY(0);
+      }
+    }
+
+    @keyframes fade {
+      from { opacity: 0; }
+      to { opacity: 1; }
+    }
+
+    @media (max-width: 1180px) {
+      .metric { grid-column: span 6; }
+      .grid-two { grid-template-columns: 1fr; }
+      .table-row { grid-template-columns: 1fr; }
+    }
+
+    @media (max-width: 980px) {
+      .app-root { padding: 12px; }
+      .shell {
+        grid-template-columns: 1fr;
+        min-height: calc(100vh - 24px);
+      }
+      .sidebar {
+        position: sticky;
+        top: 12px;
+        z-index: 20;
+      }
+      .menu {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+      }
+      .menu-btn {
+        text-align: center;
+        padding: 9px 8px;
+      }
+      .brand,
+      .brand-sub,
+      .side-host,
+      .side-foot {
+        display: none;
+      }
+    }
+
+    @media (max-width: 680px) {
+      .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .metric { grid-column: span 1; }
+      .mini-grid { grid-template-columns: 1fr; }
+      .toolbar {
+        border-radius: 14px;
+      }
+      .hero {
+        border-radius: 14px;
+      }
+      .btns,
+      .toolbar-right {
+        width: 100%;
+      }
+      .toolbar-right .btn,
+      .btns .btn {
+        flex: 1;
+      }
+      .menu {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+    }
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
 </head>
 <body>
-  <div id="app">
-    ${hasInitialStats ? renderServerDashboard(initialStats, safeHost) : ''}
-    ${hasInitialStats ? '' : `
-    <div class="login">
-      <div class="login-title">Ryzeon Shield Admin</div>
-      <div class="muted" style="margin:6px 0 14px">Host: ${safeHost}</div>
-      <form id="loginForm" method="post" action="/__shield/admin/login">
-        <input id="pwd" name="password" class="input" type="password" placeholder="Enter admin password"/>
-        <button id="loginBtn" type="submit" class="btn" style="margin-top:10px;width:100%">Login</button>
-      </form>
-      <div class="err" id="err"></div>
-    </div>
-    `}
+  <div class="atmo a"></div>
+  <div class="atmo b"></div>
+  <div id="app" class="app-root">
+    <div class="boot">Loading Shield control center...</div>
   </div>
-<script>
-(() => {
-  const SAFE_HOST = ${JSON.stringify(safeHost)};
-  const INITIAL_STATS = ${initialStatsJson};
-  const TOKEN_KEY = 'shield_admin_jwt';
-  const app = document.getElementById('app');
-  let chart = null;
-  let activeTab = 'overview';
-  let runtimePolicy = null;
-  let sitesData = null;
-  let toastTimer = null;
 
-  function esc(v){return String(v==null?'':v).replace(/[&<>"']/g,function(m){return ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'})[m];});}
-  function flag(cc){const code=String(cc||'').toUpperCase();if(!/^[A-Z]{2}$/.test(code)) return '🌍';return String.fromCodePoint.apply(String, code.split('').map(c=>127397+c.charCodeAt(0)));}
-  function getToken(){ try { return localStorage.getItem(TOKEN_KEY) || ''; } catch { return ''; } }
-  function setToken(v){ try { localStorage.setItem(TOKEN_KEY, v); } catch {} }
-  function clearToken(){ try { localStorage.removeItem(TOKEN_KEY); } catch {} }
+  <div id="modalBackdrop" class="modal-backdrop">
+    <div class="modal">
+      <div class="modal-head">
+        <div id="modalTitle" class="modal-title">Action</div>
+        <button id="modalClose" class="icon-btn" type="button">X</button>
+      </div>
+      <div id="modalBody" class="modal-body"></div>
+    </div>
+  </div>
 
-  async function api(path, opts={}){
-    const token = getToken();
-    const headers = { 'content-type': 'application/json', ...(opts.headers || {}) };
-    if (token) headers.authorization = 'Bearer ' + token;
-    const res = await fetch(path, { ...opts, headers });
-    const text = await res.text();
-    let data = {};
-    try { data = JSON.parse(text || '{}'); } catch {}
-    if (!res.ok) {
-      const err = new Error(data.error || ('HTTP ' + res.status));
-      err.status = res.status;
-      throw err;
+  <div id="toast" class="toast"></div>
+
+  <script>
+  (() => {
+    const SAFE_HOST = ${JSON.stringify(safeHost)};
+    const INITIAL_STATS = ${initialStatsJson};
+    const TOKEN_KEY = 'shield_admin_jwt';
+
+    const app = document.getElementById('app');
+    const modalBackdrop = document.getElementById('modalBackdrop');
+    const modalTitle = document.getElementById('modalTitle');
+    const modalBody = document.getElementById('modalBody');
+    const modalClose = document.getElementById('modalClose');
+    const toastEl = document.getElementById('toast');
+
+    let activeTab = 'overview';
+    let runtimePolicy = null;
+    let sitesCache = null;
+    let chart = null;
+    let pollTimer = null;
+    let toastTimer = null;
+    let rendering = false;
+
+    function esc(v) {
+      return String(v == null ? '' : v).replace(/[&<>"']/g, function (m) {
+        return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' })[m];
+      });
     }
-    return data;
-  }
 
-  function toast(message, type){
-    const el = document.getElementById('toast');
-    if (!el) return;
-    if (toastTimer) clearTimeout(toastTimer);
-    el.className = 'toast show ' + (type === 'error' ? 'error' : 'ok');
-    el.textContent = message;
-    toastTimer = setTimeout(function(){ el.className = 'toast'; }, 2300);
-  }
+    function flag(code) {
+      const value = String(code || '').toUpperCase();
+      if (!/^[A-Z]{2}$/.test(value)) return 'GL';
+      return value;
+    }
 
-  function renderFatal(message){
-    if(!app) return;
-    app.innerHTML = '<div class="login">'
-      + '<div class="login-title">Dashboard Error</div>'
-      + '<div class="muted" style="margin:6px 0 10px">Host: ' + SAFE_HOST + '</div>'
-      + '<div class="err" style="display:block">' + esc(message || 'Unknown runtime error') + '</div>'
-      + '<button class="btn" style="margin-top:10px;width:100%" onclick="location.reload()">Reload</button>'
-      + '</div>';
-  }
-
-  function renderLogin(error){
-    app.innerHTML = '<div class="login">'
-      + '<div class="login-title">Ryzeon Shield Admin</div>'
-      + '<div class="muted" style="margin:6px 0 14px">Host: ' + SAFE_HOST + '</div>'
-      + '<form id="loginForm" method="post" action="/__shield/admin/login">'
-      + '<input id="pwd" name="password" class="input" type="password" placeholder="Enter admin password"/>'
-      + '<button id="loginBtn" type="submit" class="btn" style="margin-top:10px;width:100%">Login</button>'
-      + '</form>'
-      + '<div class="err" id="err">' + esc(error || '') + '</div>'
-      + '</div>';
-
-    const form = document.getElementById('loginForm');
-    if (!form) return;
-    form.onsubmit = async function(ev){
-      ev.preventDefault();
-      const password = (document.getElementById('pwd') || {}).value || '';
+    function getToken() {
       try {
-        const r = await fetch('/__shield/admin/login', {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ password: password }),
-        });
-        const data = await r.json();
-        if (!r.ok || !data.token) throw new Error(data.error || 'Login failed');
-        setToken(data.token);
-        toast('Login successful', 'ok');
-        await renderDashboard();
-      } catch (e) {
-        renderLogin((e && e.message) || 'Login failed');
+        return localStorage.getItem(TOKEN_KEY) || '';
+      } catch {
+        return '';
       }
-    };
-  }
-
-  function buildHeatmap(hours){
-    const max = Math.max(1, ...hours.map(x => Number(x.blocked || 0)));
-    return '<div class="heat">' + hours.map(function(h){
-      const v = Number(h.blocked || 0);
-      const o = Math.max(.08, v / max);
-      return '<div class="cell" title="' + esc((h.hour || '??') + ':00 blocked=' + v) + '" style="background:rgba(255,95,122,' + o.toFixed(3) + ')"></div>';
-    }).join('') + '</div><div class="legend"><span>00:00</span><span>23:00</span></div>';
-  }
-
-  function renderLine(stats){
-    const el = document.getElementById('bpChart');
-    if (!el) return;
-    const labels = (stats.hourly || []).map(x => x.hour + ':00');
-    const blocked = (stats.hourly || []).map(x => Number(x.blocked || 0));
-    const passed = (stats.hourly || []).map(x => Number(x.passed || 0));
-    if (chart) chart.destroy();
-    chart = new Chart(el, {
-      type: 'line',
-      data: {
-        labels: labels,
-        datasets: [
-          { label: 'Blocked', data: blocked, borderColor: '#ff5f7a', backgroundColor: 'rgba(255,95,122,.14)', tension: .3, fill: true },
-          { label: 'Passed', data: passed, borderColor: '#2ddf87', backgroundColor: 'rgba(45,223,135,.10)', tension: .3, fill: true },
-        ],
-      },
-      options: {
-        responsive: true,
-        maintainAspectRatio: false,
-        plugins: { legend: { labels: { color: '#d5e4ff' } } },
-        scales: {
-          x: { ticks: { color: '#9cb0d6' }, grid: { color: 'rgba(255,255,255,.06)' } },
-          y: { ticks: { color: '#9cb0d6' }, grid: { color: 'rgba(255,255,255,.06)' }, beginAtZero: true },
-        },
-      },
-    });
-  }
-
-  function sidebar(){
-    const tabs = [
-      ['overview','Dashboard'],
-      ['threats','Threats'],
-      ['traffic','Traffic'],
-      ['topips','Top IPs'],
-      ['sites','Protected Sites'],
-      ['profile','Profile'],
-      ['settings','Settings'],
-    ];
-    return '<aside class="sidebar">'
-      + '<div class="brand">RYZEON</div>'
-      + '<div class="brand-sub">Shield Console</div>'
-      + '<div class="host-box">' + SAFE_HOST + '</div>'
-      + '<nav class="menu">'
-      + tabs.map(function(t){return '<button class="menu-btn' + (activeTab === t[0] ? ' active' : '') + '" data-tab="' + t[0] + '">' + t[1] + '</button>';}).join('')
-      + '</nav>'
-      + '<div class="side-foot">Version: Shield v3</div>'
-      + '</aside>';
-  }
-
-  function rail(){
-    return '<aside class="rail">'
-      + '<button class="rail-btn' + (activeTab==='overview'?' active':'') + '" data-tab="overview">🛡️</button>'
-      + '<button class="rail-btn' + (activeTab==='threats'?' active':'') + '" data-tab="threats">📊</button>'
-      + '<button class="rail-btn' + (activeTab==='sites'?' active':'') + '" data-tab="sites">🌐</button>'
-      + '<button class="rail-btn' + (activeTab==='settings'?' active':'') + '" data-tab="settings">⚙️</button>'
-      + '</aside>';
-  }
-
-  function topBar(){
-    return '<header class="topbar">'
-      + '<div class="search-wrap"><input id="globalSearch" class="search" placeholder="Search events, IPs, countries..." /></div>'
-      + '<div class="profile-pill"><span class="dot"></span> Shield Admin</div>'
-      + '</header>';
-  }
-
-  function overviewTab(stats){
-    const reqps = Number(stats.live?.requestsPerSecond || 0);
-    const reqpm = Number(stats.live?.requestsLastMinute || 0);
-    const blocked24 = Number(stats.kpi?.blocked24h || 0);
-    const passed24 = Number(stats.kpi?.passed24h || 0);
-    const ratio = (blocked24 + passed24) ? Math.round((blocked24 / (blocked24 + passed24)) * 100) : 0;
-    const topCountries = (stats.countries || []).slice(0, 8);
-    const topIps = (stats.topIps || []).slice(0, 8);
-    const countryMax = Math.max(1, ...topCountries.map(x => Number(x.count || 0)));
-
-    return '<div class="tabs-shell">'
-      + '<div class="kpi-grid">'
-      + '<section class="glass-card stat-card"><div class="label">Live requests/sec</div><div class="value">' + reqps.toFixed(2) + '</div><div class="muted">Last minute: ' + reqpm + '</div></section>'
-      + '<section class="glass-card stat-card"><div class="label">Blocked (24h)</div><div class="value bad">' + blocked24 + '</div><div class="muted">Threat ratio: ' + ratio + '%</div></section>'
-      + '<section class="glass-card stat-card"><div class="label">Passed (24h)</div><div class="value ok">' + passed24 + '</div><div class="muted">Host: ' + SAFE_HOST + '</div></section>'
-      + '<section class="glass-card stat-card"><div class="label">Unique Attack IPs</div><div class="value warn">' + Number(stats.kpi?.uniqueAttackIps24h || 0) + '</div><div class="muted">Countries: ' + Number(stats.kpi?.activeCountries24h || 0) + '</div></section>'
-      + '</div>'
-      + '<div class="split">'
-      + '<section class="glass-card"><div class="section-title">Threat Heatmap</div><div class="section-sub">Blocked requests per hour</div>' + buildHeatmap(stats.heatmap || []) + '</section>'
-      + '<section class="glass-card"><div class="section-title">Top Countries</div><div class="list" style="margin-top:10px">'
-      + topCountries.map(function(c){ const v = Number(c.count || 0); const p = Math.max(4, Math.round((v / countryMax) * 100)); return '<div><div class="row"><span>' + flag(c.country) + ' ' + esc(c.country || 'N/A') + '</span><span>' + v + '</span></div><div class="bar"><span style="width:' + p + '%"></span></div></div>'; }).join('')
-      + '</div></section>'
-      + '</div>'
-      + '<section class="glass-card" style="margin-top:12px"><div class="section-title">Blocked vs Passed</div><div style="height:300px;margin-top:8px"><canvas id="bpChart"></canvas></div></section>'
-      + '<section class="glass-card" style="margin-top:12px"><div class="section-title">Top Attacking IPs</div><div class="list" style="margin-top:10px">'
-      + (topIps.length ? topIps.map(function(r){return '<div class="row"><span>' + esc(r.ip || 'N/A') + '</span><span class="chip">' + Number(r.count || 0) + ' hits</span></div>';}).join('') : '<div class="muted">No recent attack data.</div>')
-      + '</div></section>'
-      + '</div>';
-  }
-
-  function threatsTab(stats){
-    return '<div class="tabs-shell">'
-      + '<section class="glass-card"><div class="section-title">Threat Intelligence</div><div class="section-sub">Action center for abuse handling</div>'
-      + '<div class="top-actions" style="margin-top:12px">'
-      + '<button class="btn warn" data-quick-action="suspend">Suspend IP</button>'
-      + '<button class="btn secondary" data-quick-action="unsuspend">Unsuspend IP</button>'
-      + '<button class="btn danger" data-quick-action="blacklist">Blacklist IP</button>'
-      + '<button class="btn" data-quick-action="unblacklist">Unblacklist IP</button>'
-      + '</div></section>'
-      + '<section class="glass-card" style="margin-top:12px"><div class="section-title">24h Snapshot</div><div class="mini-grid" style="margin-top:10px">'
-      + '<div class="mini"><div class="k">Blocked</div><div class="v" style="color:var(--bad)">' + Number(stats.kpi?.blocked24h || 0) + '</div></div>'
-      + '<div class="mini"><div class="k">Unique Attack IPs</div><div class="v">' + Number(stats.kpi?.uniqueAttackIps24h || 0) + '</div></div>'
-      + '<div class="mini"><div class="k">Active Countries</div><div class="v">' + Number(stats.kpi?.activeCountries24h || 0) + '</div></div>'
-      + '</div></section>'
-      + '</div>';
-  }
-
-  function trafficTab(stats){
-    const h = stats.hourly || [];
-    const passed = h.reduce((a,b)=>a+Number(b.passed||0),0);
-    const blocked = h.reduce((a,b)=>a+Number(b.blocked||0),0);
-    return '<div class="tabs-shell">'
-      + '<section class="glass-card"><div class="section-title">Traffic Summary</div><div class="mini-grid" style="margin-top:10px">'
-      + '<div class="mini"><div class="k">Total Passed</div><div class="v" style="color:var(--ok)">' + passed + '</div></div>'
-      + '<div class="mini"><div class="k">Total Blocked</div><div class="v" style="color:var(--bad)">' + blocked + '</div></div>'
-      + '<div class="mini"><div class="k">Current RPS</div><div class="v">' + Number(stats.live?.requestsPerSecond || 0).toFixed(2) + '</div></div>'
-      + '</div></section>'
-      + '<section class="glass-card" style="margin-top:12px"><div class="section-title">Blocked vs Passed (24h)</div><div style="height:300px;margin-top:8px"><canvas id="bpChart"></canvas></div></section>'
-      + '</div>';
-  }
-
-  function topIpsTab(stats){
-    const topIps = (stats.topIps || []).slice(0, 24);
-    return '<div class="tabs-shell">'
-      + '<section class="glass-card"><div class="section-title">Top Attacking IPs</div><div class="section-sub">Click manage to open a popup action</div><div class="list" style="margin-top:12px">'
-      + (topIps.length ? topIps.map(function(r, i){ return '<div class="row"><span>#' + (i + 1) + ' ' + esc(r.ip || 'N/A') + '</span><span><button class="btn secondary" data-manage-ip="' + esc(r.ip || '') + '">Manage</button></span></div>'; }).join('') : '<div class="muted">No recent attack data.</div>')
-      + '</div></section>'
-      + '</div>';
-  }
-
-  function profileTab(stats){
-    return '<div class="tabs-shell">'
-      + '<section class="glass-card"><div class="section-title">Admin Profile</div><div class="mini-grid" style="margin-top:10px">'
-      + '<div class="mini"><div class="k">Role</div><div class="v">Shield Admin</div></div>'
-      + '<div class="mini"><div class="k">Session</div><div class="v">Active</div></div>'
-      + '<div class="mini"><div class="k">Host</div><div class="v">' + SAFE_HOST + '</div></div>'
-      + '</div></section>'
-      + '<section class="glass-card" style="margin-top:12px"><div class="section-title">Environment</div><div class="section-sub">Shield version: ' + esc(stats.version || 'v3') + '</div><div class="muted" style="margin-top:8px;word-break:break-all">' + esc(navigator.userAgent || 'Unknown') + '</div></section>'
-      + '</div>';
-  }
-
-  function sitesTab(sites){
-    const rows = (sites || []);
-    return '<div class="tabs-shell">'
-      + '<section class="glass-card"><div class="section-title">Protected Sites</div><div class="section-sub">Manage domains proxied through Ryzeon Shield</div>'
-      + '<div class="top-actions" style="margin-top:12px"><button id="addSiteBtn" class="btn">+ Add Domain</button></div>'
-      + '<div class="list" style="margin-top:14px">'
-      + (rows.length ? rows.map(function(s){
-        const statusBadge = s.active ? '<span class="chip" style="border-color:rgba(45,223,135,.5);color:var(--ok)">Active</span>' : '<span class="chip" style="border-color:rgba(255,95,122,.5);color:var(--bad)">Disabled</span>';
-        return '<div class="glass-card" style="padding:12px;margin-bottom:8px">'
-          + '<div class="row"><span style="font-weight:700">' + esc(s.domain || 'N/A') + '</span>' + statusBadge + '</div>'
-          + '<div class="row" style="margin-top:6px"><span class="muted">Origin: ' + esc(s.originUrl || 'N/A') + '</span><span class="muted">Plan: ' + esc(s.plan || 'free') + '</span></div>'
-          + '<div class="row" style="margin-top:6px"><span class="muted">API Key: <code style="font-size:.75rem;color:var(--blue2)">' + esc(s.apiKey || 'N/A') + '</code></span></div>'
-          + '<div class="top-actions" style="margin-top:8px">'
-          + '<button class="btn secondary" data-site-toggle="' + esc(s.domain) + '" data-site-active="' + (s.active ? '1' : '0') + '">' + (s.active ? 'Disable' : 'Enable') + '</button>'
-          + '<button class="btn danger" data-site-remove="' + esc(s.domain) + '">Remove</button>'
-          + '</div></div>';
-      }).join('') : '<div class="muted">No protected sites yet. Add a domain to get started.</div>')
-      + '</div></section>'
-      + '<section class="glass-card" style="margin-top:12px"><div class="section-title">How it works</div><div class="muted" style="margin-top:8px;line-height:1.6">'
-      + '1. Add your domain and origin server URL above.<br>'
-      + '2. Create a <strong>CNAME</strong> record pointing your domain to your Shield worker hostname (e.g. <code style="color:var(--blue2)">' + safeHost + '</code>).<br>'
-      + '3. All traffic to your domain will be proxied through Ryzeon Shield with full DDoS protection.<br>'
-      + '4. Your origin IP stays hidden — visitors only see your domain.'
-      + '</div></section></div>';
-  }
-
-  function settingsTab(policy){
-    const p = policy || {};
-    const rows = [
-      ['protectEnabled','Global protection', !!p.protectEnabled],
-      ['rateLimitEnabled','Rate limit', !!p.rateLimitEnabled],
-      ['attackBlockEnabled','Attack blocking', !!p.attackBlockEnabled],
-      ['vpnBlockEnabled','VPN/Proxy block', !!p.vpnBlockEnabled],
-      ['honeypotEnabled','Honeypot system', !!p.honeypotEnabled],
-      ['aiCrawlerBlockEnabled','AI crawler block', !!p.aiCrawlerBlockEnabled],
-      ['ddosBlockEnabled','DDoS heuristic block', !!p.ddosBlockEnabled],
-    ];
-    return '<div class="tabs-shell">'
-      + '<section class="glass-card"><div class="section-title">Protection Settings</div><div class="section-sub">Toggle live policy controls for Shield</div><div class="list" style="margin-top:12px">'
-      + rows.map(function(r){ return '<label class="switch"><span>' + r[1] + '</span><input class="policy-toggle" type="checkbox" data-key="' + r[0] + '" ' + (r[2] ? 'checked' : '') + '></label>'; }).join('')
-      + '</div></section>'
-      + '<section class="glass-card danger-zone" style="margin-top:12px"><div class="section-title">Danger Zone</div><div class="section-sub">IP actions will open a confirmation popup.</div><div class="top-actions" style="margin-top:10px">'
-      + '<button class="btn danger" data-quick-action="suspend">Suspend IP</button>'
-      + '<button class="btn secondary" data-quick-action="unsuspend">Unsuspend IP</button>'
-      + '</div></section>'
-      + '</div>';
-  }
-
-  function openModal(html){
-    const modal = document.getElementById('modalBackdrop');
-    const body = document.getElementById('modalBody');
-    if (!modal || !body) return;
-    body.innerHTML = html;
-    modal.classList.add('show');
-    const x = document.getElementById('modalClose');
-    if (x) x.onclick = closeModal;
-    modal.onclick = function(ev){ if (ev.target === modal) closeModal(); };
-  }
-
-  function closeModal(){
-    const modal = document.getElementById('modalBackdrop');
-    if (modal) modal.classList.remove('show');
-  }
-
-  async function submitQuickAction(payload){
-    const action = String(payload.action || '');
-    const ip = String(payload.ip || '').trim();
-    if (!ip) throw new Error('IP is required');
-
-    if (action === 'blacklist') return api('/__shield/admin/blacklist/add', { method: 'POST', body: JSON.stringify({ ip: ip }) });
-    if (action === 'unblacklist') return api('/__shield/admin/unblacklist', { method: 'POST', body: JSON.stringify({ ip: ip }) });
-    if (action === 'unsuspend') return api('/__shield/admin/ip/unsuspend', { method: 'POST', body: JSON.stringify({ ip: ip }) });
-    if (action === 'suspend') {
-      const reason = String(payload.reason || 'Admin suspend');
-      return api('/__shield/admin/ip/suspend', { method: 'POST', body: JSON.stringify({ ip: ip, reason: reason, permanent: true, durationSeconds: 3600 }) });
     }
-    throw new Error('Unsupported action');
-  }
 
-  function openQuickActionModal(defaultAction, defaultIp){
-    openModal(
-      '<div class="muted">Run moderation action against a target IP.</div>'
-      + '<label class="muted">Action</label>'
-      + '<select id="qaAction" class="input">'
-      + '<option value="blacklist" ' + (defaultAction === 'blacklist' ? 'selected' : '') + '>Blacklist IP</option>'
-      + '<option value="unblacklist" ' + (defaultAction === 'unblacklist' ? 'selected' : '') + '>Unblacklist IP</option>'
-      + '<option value="suspend" ' + (defaultAction === 'suspend' ? 'selected' : '') + '>Suspend IP</option>'
-      + '<option value="unsuspend" ' + (defaultAction === 'unsuspend' ? 'selected' : '') + '>Unsuspend IP</option>'
-      + '</select>'
-      + '<label class="muted">Target IP</label>'
-      + '<input id="qaIp" class="input" placeholder="1.2.3.4" value="' + esc(defaultIp || '') + '">'
-      + '<label class="muted">Reason (for suspend)</label>'
-      + '<input id="qaReason" class="input" placeholder="Abuse pattern detected" value="Admin action">'
-      + '<div class="top-actions" style="margin-top:4px"><button id="qaSubmit" class="btn">Confirm</button><button id="qaCancel" class="btn secondary">Cancel</button></div>'
-    );
+    function setToken(v) {
+      try {
+        localStorage.setItem(TOKEN_KEY, v || '');
+      } catch {}
+    }
 
-    const submit = document.getElementById('qaSubmit');
-    const cancel = document.getElementById('qaCancel');
-    if (cancel) cancel.onclick = closeModal;
-    if (submit) {
-      submit.onclick = async function(){
+    function clearToken() {
+      try {
+        localStorage.removeItem(TOKEN_KEY);
+      } catch {}
+    }
+
+    async function api(path, opts = {}) {
+      const token = getToken();
+      const headers = { 'content-type': 'application/json' };
+      const extraHeaders = opts.headers && typeof opts.headers === 'object' ? opts.headers : {};
+      for (const key of Object.keys(extraHeaders)) headers[key] = extraHeaders[key];
+      if (token) headers.authorization = 'Bearer ' + token;
+
+      const response = await fetch(path, { ...opts, headers: headers });
+      const text = await response.text();
+      let data = {};
+      try {
+        data = JSON.parse(text || '{}');
+      } catch {
+        data = {};
+      }
+
+      if (!response.ok) {
+        const err = new Error(data.error || ('HTTP ' + response.status));
+        err.status = response.status;
+        throw err;
+      }
+      return data;
+    }
+
+    function showToast(message, type) {
+      if (!toastEl) return;
+      if (toastTimer) clearTimeout(toastTimer);
+      toastEl.className = 'toast show ' + (type === 'error' ? 'error' : 'ok');
+      toastEl.textContent = message || '';
+      toastTimer = setTimeout(function () {
+        toastEl.className = 'toast';
+      }, 2400);
+    }
+
+    function openModal(title, html) {
+      if (!modalBackdrop || !modalBody || !modalTitle) return;
+      modalTitle.textContent = title || 'Action';
+      modalBody.innerHTML = html || '';
+      modalBackdrop.classList.add('show');
+    }
+
+    function closeModal() {
+      if (!modalBackdrop) return;
+      modalBackdrop.classList.remove('show');
+      if (modalBody) modalBody.innerHTML = '';
+    }
+
+    if (modalClose) {
+      modalClose.addEventListener('click', closeModal);
+    }
+    if (modalBackdrop) {
+      modalBackdrop.addEventListener('click', function (ev) {
+        if (ev.target === modalBackdrop) closeModal();
+      });
+    }
+    window.addEventListener('keydown', function (ev) {
+      if (ev.key === 'Escape') closeModal();
+    });
+
+    function buildHeatmap(hours) {
+      const values = Array.isArray(hours) ? hours : [];
+      const max = Math.max(1, ...values.map(function (x) { return Number(x.blocked || 0); }));
+      return '<div class="heat">' + values.map(function (item) {
+        const count = Number(item.blocked || 0);
+        const alpha = Math.max(0.1, count / max);
+        const title = esc((item.hour || '00') + ':00 blocked=' + count);
+        return '<div class="cell" title="' + title + '" style="background: rgba(185, 28, 28, ' + alpha.toFixed(3) + ')"></div>';
+      }).join('') + '</div><div class="legend"><span>00:00</span><span>23:00</span></div>';
+    }
+
+    function sidebar() {
+      const tabs = [
+        ['overview', 'Overview'],
+        ['threats', 'Threat Ops'],
+        ['traffic', 'Traffic'],
+        ['topips', 'Top IPs'],
+        ['sites', 'Sites'],
+        ['settings', 'Policy'],
+        ['profile', 'Profile'],
+      ];
+
+      return '<aside class="sidebar">'
+        + '<div class="brand-kicker">Ryzeon Shield</div>'
+        + '<div class="brand">Control</div>'
+        + '<div class="brand-sub">Security operations dashboard</div>'
+        + '<div class="side-host">Host: ' + esc(SAFE_HOST) + '</div>'
+        + '<nav class="menu">'
+        + tabs.map(function (tab) {
+          return '<button class="menu-btn' + (activeTab === tab[0] ? ' active' : '') + '" data-tab="' + tab[0] + '">' + tab[1] + '</button>';
+        }).join('')
+        + '</nav>'
+        + '<div class="side-foot">Shield v3 · Smooth panel rebuild</div>'
+        + '</aside>';
+    }
+
+    function toolbar(stats) {
+      const reqps = Number(stats && stats.live ? stats.live.requestsPerSecond : 0).toFixed(2);
+      return '<header class="toolbar">'
+        + '<div class="toolbar-left">'
+        + '<div class="chip"><span class="dot"></span><span>Live ' + reqps + ' req/s</span></div>'
+        + '<div class="chip"><span>Host ' + esc(SAFE_HOST) + '</span></div>'
+        + '</div>'
+        + '<div class="toolbar-right">'
+        + '<button id="refreshBtn" class="btn ghost" type="button">Refresh</button>'
+        + '<button id="quickActionBtn" class="btn warn" type="button">Quick Action</button>'
+        + '<button id="logoutBtn" class="btn ghost" type="button">Logout</button>'
+        + '</div>'
+        + '</header>';
+    }
+
+    function overviewTab(stats) {
+      const requestsMinute = Number(stats && stats.live ? stats.live.requestsLastMinute : 0);
+      const reqps = Number(stats && stats.live ? stats.live.requestsPerSecond : 0).toFixed(2);
+      const blocked = Number(stats && stats.kpi ? stats.kpi.blocked24h : 0);
+      const passed = Number(stats && stats.kpi ? stats.kpi.passed24h : 0);
+      const attackIps = Number(stats && stats.kpi ? stats.kpi.uniqueAttackIps24h : 0);
+      const countries = Number(stats && stats.kpi ? stats.kpi.activeCountries24h : 0);
+      const ratio = blocked + passed > 0 ? ((blocked / (blocked + passed)) * 100).toFixed(1) : '0.0';
+      const topCountries = (Array.isArray(stats && stats.countries ? stats.countries : []) ? stats.countries : []).slice(0, 8);
+      const topIps = (Array.isArray(stats && stats.topIps ? stats.topIps : []) ? stats.topIps : []).slice(0, 8);
+      const countryMax = Math.max(1, ...topCountries.map(function (row) { return Number(row.count || 0); }));
+
+      return '<section class="content-pane">'
+        + '<div class="hero">'
+        + '<div><h1>Shield operations at a glance</h1><p>Live threat pressure, enforcement posture, and traffic quality in one board.</p></div>'
+        + '<div class="badge">Threat ratio ' + ratio + '%</div>'
+        + '</div>'
+        + '<div class="metrics">'
+        + '<article class="metric"><div class="k">Requests per second</div><div class="v">' + reqps + '</div><div class="s">Last minute ' + requestsMinute + '</div></article>'
+        + '<article class="metric bad"><div class="k">Blocked 24h</div><div class="v">' + blocked + '</div><div class="s">Challenged or denied requests</div></article>'
+        + '<article class="metric ok"><div class="k">Passed 24h</div><div class="v">' + passed + '</div><div class="s">Validated clean traffic</div></article>'
+        + '<article class="metric warn"><div class="k">Unique attack IPs</div><div class="v">' + attackIps + '</div><div class="s">Countries involved ' + countries + '</div></article>'
+        + '</div>'
+        + '<div class="grid-two">'
+        + '<article class="panel"><div class="panel-head"><div><h2 class="panel-title">Threat pressure heatmap</h2><p class="panel-sub">Hourly blocked activity during the last 24h</p></div></div>'
+        + buildHeatmap(Array.isArray(stats && stats.heatmap ? stats.heatmap : []) ? stats.heatmap : [])
+        + '</article>'
+        + '<article class="panel"><div class="panel-head"><div><h2 class="panel-title">Top countries</h2><p class="panel-sub">Where blocked traffic is coming from</p></div></div>'
+        + '<div class="list">'
+        + (topCountries.length ? topCountries.map(function (row) {
+          const count = Number(row.count || 0);
+          const width = Math.max(5, Math.round((count / countryMax) * 100));
+          return '<div>'
+            + '<div class="row"><span>' + esc(flag(row.country)) + '</span><span>' + count + '</span></div>'
+            + '<div class="bar"><span style="width:' + width + '%"></span></div>'
+            + '</div>';
+        }).join('') : '<div class="empty">No country-level threat data yet.</div>')
+        + '</div>'
+        + '</article>'
+        + '</div>'
+        + '<article class="panel" style="margin-top:10px"><div class="panel-head"><div><h2 class="panel-title">Blocked vs passed trend</h2><p class="panel-sub">Traffic quality curve for the last 24h</p></div></div><div class="chart-wrap"><canvas id="trafficChart"></canvas></div></article>'
+        + '<article class="panel" style="margin-top:10px"><div class="panel-head"><div><h2 class="panel-title">Top attacking IPs</h2><p class="panel-sub">Fast moderation actions ready</p></div></div><div class="table">'
+        + (topIps.length ? topIps.map(function (row) {
+          return '<div class="table-row"><span class="mono">' + esc(row.ip || 'N/A') + '</span><span class="badge">' + Number(row.count || 0) + ' hits</span><button class="btn ghost" type="button" data-manage-ip="' + esc(row.ip || '') + '">Manage</button></div>';
+        }).join('') : '<div class="empty">No attack leaders in the selected window.</div>')
+        + '</div></article>'
+        + '</section>';
+    }
+
+    function threatsTab(stats) {
+      const topIps = (Array.isArray(stats && stats.topIps ? stats.topIps : []) ? stats.topIps : []).slice(0, 6);
+      const blocked = Number(stats && stats.kpi ? stats.kpi.blocked24h : 0);
+      const attackIps = Number(stats && stats.kpi ? stats.kpi.uniqueAttackIps24h : 0);
+      const countries = Number(stats && stats.kpi ? stats.kpi.activeCountries24h : 0);
+
+      return '<section class="content-pane">'
+        + '<div class="hero"><div><h1>Threat operations</h1><p>Rapid response tools for active abuse and hostile traffic.</p></div></div>'
+        + '<article class="panel">'
+        + '<div class="panel-head"><div><h2 class="panel-title">Immediate actions</h2><p class="panel-sub">Use one modal for blacklisting, unblacklisting, suspend, or unsuspend.</p></div></div>'
+        + '<div class="btns">'
+        + '<button class="btn warn" type="button" data-quick-action="suspend">Suspend IP</button>'
+        + '<button class="btn ghost" type="button" data-quick-action="unsuspend">Unsuspend IP</button>'
+        + '<button class="btn danger" type="button" data-quick-action="blacklist">Blacklist IP</button>'
+        + '<button class="btn primary" type="button" data-quick-action="unblacklist">Unblacklist IP</button>'
+        + '</div>'
+        + '</article>'
+        + '<article class="panel" style="margin-top:10px">'
+        + '<div class="panel-head"><div><h2 class="panel-title">24h threat snapshot</h2><p class="panel-sub">Current pressure and spread.</p></div></div>'
+        + '<div class="mini-grid">'
+        + '<div class="mini"><div class="k">Blocked requests</div><div class="v" style="color:#b91c1c">' + blocked + '</div></div>'
+        + '<div class="mini"><div class="k">Unique attackers</div><div class="v">' + attackIps + '</div></div>'
+        + '<div class="mini"><div class="k">Active countries</div><div class="v">' + countries + '</div></div>'
+        + '</div>'
+        + '</article>'
+        + '<article class="panel" style="margin-top:10px">'
+        + '<div class="panel-head"><div><h2 class="panel-title">Hot IP queue</h2><p class="panel-sub">Most aggressive addresses in this window.</p></div></div>'
+        + '<div class="table">'
+        + (topIps.length ? topIps.map(function (row) {
+          return '<div class="table-row"><span class="mono">' + esc(row.ip || 'N/A') + '</span><span class="badge">' + Number(row.count || 0) + ' hits</span><button class="btn ghost" type="button" data-manage-ip="' + esc(row.ip || '') + '">Action</button></div>';
+        }).join('') : '<div class="empty">No urgent IP actions right now.</div>')
+        + '</div>'
+        + '</article>'
+        + '</section>';
+    }
+
+    function trafficTab(stats) {
+      const hourly = Array.isArray(stats && stats.hourly ? stats.hourly : []) ? stats.hourly : [];
+      const passed = hourly.reduce(function (sum, row) { return sum + Number(row.passed || 0); }, 0);
+      const blocked = hourly.reduce(function (sum, row) { return sum + Number(row.blocked || 0); }, 0);
+      const reqps = Number(stats && stats.live ? stats.live.requestsPerSecond : 0).toFixed(2);
+
+      return '<section class="content-pane">'
+        + '<div class="hero"><div><h1>Traffic quality</h1><p>Understand clean flow versus hostile flow over time.</p></div></div>'
+        + '<article class="panel">'
+        + '<div class="mini-grid">'
+        + '<div class="mini"><div class="k">Total passed</div><div class="v" style="color:#15803d">' + passed + '</div></div>'
+        + '<div class="mini"><div class="k">Total blocked</div><div class="v" style="color:#b91c1c">' + blocked + '</div></div>'
+        + '<div class="mini"><div class="k">Live RPS</div><div class="v">' + reqps + '</div></div>'
+        + '</div>'
+        + '</article>'
+        + '<article class="panel" style="margin-top:10px"><div class="panel-head"><div><h2 class="panel-title">24h throughput</h2><p class="panel-sub">Blocked versus passed requests by hour.</p></div></div><div class="chart-wrap"><canvas id="trafficChart"></canvas></div></article>'
+        + '</section>';
+    }
+
+    function topIpsTab(stats) {
+      const topIps = (Array.isArray(stats && stats.topIps ? stats.topIps : []) ? stats.topIps : []).slice(0, 24);
+      return '<section class="content-pane">'
+        + '<div class="hero"><div><h1>Top IP offenders</h1><p>Prioritize high-volume attackers with one-click actions.</p></div></div>'
+        + '<article class="panel">'
+        + '<div class="panel-head"><div><h2 class="panel-title">IP ranking</h2><p class="panel-sub">Sorted by blocked activity count.</p></div></div>'
+        + '<div class="table">'
+        + (topIps.length ? topIps.map(function (row, idx) {
+          const ip = esc(row.ip || 'N/A');
+          const count = Number(row.count || 0);
+          return '<div class="table-row"><span class="mono">#' + (idx + 1) + ' ' + ip + '</span><span class="badge">' + count + ' hits</span><button class="btn ghost" type="button" data-manage-ip="' + ip + '">Manage</button></div>';
+        }).join('') : '<div class="empty">No IP data available yet.</div>')
+        + '</div>'
+        + '</article>'
+        + '</section>';
+    }
+
+    function sitesTab(sites) {
+      const rows = Array.isArray(sites) ? sites : [];
+      return '<section class="content-pane">'
+        + '<div class="hero"><div><h1>Protected sites</h1><p>Manage domains reverse-proxied through Shield.</p></div><button id="addSiteBtn" class="btn primary" type="button">Add Domain</button></div>'
+        + '<article class="panel">'
+        + '<div class="panel-head"><div><h2 class="panel-title">Active tenant list</h2><p class="panel-sub">Enable, disable, or remove protected domains.</p></div></div>'
+        + '<div class="site-grid">'
+        + (rows.length ? rows.map(function (site) {
+          const domain = esc(site.domain || 'N/A');
+          const origin = esc(site.originUrl || 'N/A');
+          const plan = esc(site.plan || 'free');
+          const key = esc(site.apiKey || 'N/A');
+          const active = !!site.active;
+          return '<div class="site-card">'
+            + '<div class="row"><span class="domain">' + domain + '</span><span class="badge ' + (active ? 'good' : 'off') + '">' + (active ? 'Active' : 'Disabled') + '</span></div>'
+            + '<div class="meta">Origin: ' + origin + '</div>'
+            + '<div class="meta">Plan: ' + plan + '</div>'
+            + '<div class="meta">API Key: <span class="mono">' + key + '</span></div>'
+            + '<div class="btns" style="margin-top:8px">'
+            + '<button class="btn ghost" type="button" data-site-toggle="' + domain + '" data-site-active="' + (active ? '1' : '0') + '">' + (active ? 'Disable' : 'Enable') + '</button>'
+            + '<button class="btn danger" type="button" data-site-remove="' + domain + '">Remove</button>'
+            + '</div>'
+            + '</div>';
+        }).join('') : '<div class="empty">No protected sites yet. Add your first domain to start proxying through Shield.</div>')
+        + '</div>'
+        + '</article>'
+        + '<article class="panel" style="margin-top:10px"><div class="panel-head"><div><h2 class="panel-title">Routing checklist</h2><p class="panel-sub">Keep onboarding steps visible for your team.</p></div></div>'
+        + '<div class="list">'
+        + '<div class="row"><span>1. Add domain with origin URL above.</span></div>'
+        + '<div class="row"><span>2. Point DNS to your worker host: ' + esc(SAFE_HOST) + '.</span></div>'
+        + '<div class="row"><span>3. Verify traffic appears in dashboard metrics.</span></div>'
+        + '<div class="row"><span>4. Keep origin hidden and monitor threat ratio.</span></div>'
+        + '</div></article>'
+        + '</section>';
+    }
+
+    function settingsTab(policy) {
+      const p = policy || {};
+      const rows = [
+        ['protectEnabled', 'Global protection', 'Master gate for all challenge and detection flows.', !!p.protectEnabled],
+        ['rateLimitEnabled', 'Rate limiting', 'Apply request window controls before escalation.', !!p.rateLimitEnabled],
+        ['attackBlockEnabled', 'Attack blocking', 'Auto-block requests classified as active attacks.', !!p.attackBlockEnabled],
+        ['honeypotEnabled', 'Honeypot traps', 'Enable deceptive endpoint and form traps.', !!p.honeypotEnabled],
+        ['aiCrawlerBlockEnabled', 'AI crawler block', 'Block or challenge known automated crawler signatures.', !!p.aiCrawlerBlockEnabled],
+        ['ddosBlockEnabled', 'DDoS heuristics', 'Escalate large, coordinated flood patterns quickly.', !!p.ddosBlockEnabled],
+        ['vpnBlockEnabled', 'VPN/proxy block', 'Apply VPN and anonymizer network restrictions.', !!p.vpnBlockEnabled],
+      ];
+
+      return '<section class="content-pane">'
+        + '<div class="hero"><div><h1>Policy controls</h1><p>Adjust enforcement behavior in real time without redeploying.</p></div></div>'
+        + '<article class="panel">'
+        + '<div class="panel-head"><div><h2 class="panel-title">Live toggles</h2><p class="panel-sub">Changes are committed to Shield KV immediately.</p></div></div>'
+        + '<div class="switch-list">'
+        + rows.map(function (row) {
+          return '<label class="switch"><div><div class="name">' + row[1] + '</div><div class="desc">' + row[2] + '</div></div><input class="policy-toggle" data-key="' + row[0] + '" type="checkbox" ' + (row[3] ? 'checked' : '') + '></label>';
+        }).join('')
+        + '</div>'
+        + '</article>'
+        + '<article class="panel danger-zone" style="margin-top:10px">'
+        + '<div class="panel-head"><div><h2 class="panel-title">High impact actions</h2><p class="panel-sub">Fast path for emergency IP moderation.</p></div></div>'
+        + '<div class="btns">'
+        + '<button class="btn danger" type="button" data-quick-action="suspend">Suspend IP</button>'
+        + '<button class="btn ghost" type="button" data-quick-action="unsuspend">Unsuspend IP</button>'
+        + '</div>'
+        + '</article>'
+        + '</section>';
+    }
+
+    function profileTab(stats) {
+      const ua = esc(navigator.userAgent || 'Unknown');
+      const version = esc((stats && stats.version) || 'v3');
+      return '<section class="content-pane">'
+        + '<div class="hero"><div><h1>Session profile</h1><p>Operator context for this authenticated dashboard session.</p></div></div>'
+        + '<article class="panel">'
+        + '<div class="mini-grid">'
+        + '<div class="mini"><div class="k">Role</div><div class="v">Shield Admin</div></div>'
+        + '<div class="mini"><div class="k">Session state</div><div class="v">Active</div></div>'
+        + '<div class="mini"><div class="k">Host</div><div class="v">' + esc(SAFE_HOST) + '</div></div>'
+        + '</div>'
+        + '</article>'
+        + '<article class="panel" style="margin-top:10px">'
+        + '<div class="panel-head"><div><h2 class="panel-title">Runtime details</h2><p class="panel-sub">Environment snapshot from browser context.</p></div><span class="badge">Shield ' + version + '</span></div>'
+        + '<div class="empty" style="word-break:break-word">' + ua + '</div>'
+        + '</article>'
+        + '</section>';
+    }
+
+    function renderTab(stats) {
+      if (activeTab === 'overview') return overviewTab(stats);
+      if (activeTab === 'threats') return threatsTab(stats);
+      if (activeTab === 'traffic') return trafficTab(stats);
+      if (activeTab === 'topips') return topIpsTab(stats);
+      if (activeTab === 'sites') return sitesTab(sitesCache || []);
+      if (activeTab === 'settings') return settingsTab(runtimePolicy || {});
+      if (activeTab === 'profile') return profileTab(stats);
+      return overviewTab(stats);
+    }
+
+    function drawTrafficChart(stats) {
+      const el = document.getElementById('trafficChart');
+      if (!el) {
+        if (chart) {
+          chart.destroy();
+          chart = null;
+        }
+        return;
+      }
+      if (typeof Chart === 'undefined') return;
+
+      const hourly = Array.isArray(stats && stats.hourly ? stats.hourly : []) ? stats.hourly : [];
+      const labels = hourly.map(function (row) { return String(row.hour || '00') + ':00'; });
+      const blocked = hourly.map(function (row) { return Number(row.blocked || 0); });
+      const passed = hourly.map(function (row) { return Number(row.passed || 0); });
+
+      if (chart) chart.destroy();
+      chart = new Chart(el, {
+        type: 'line',
+        data: {
+          labels: labels,
+          datasets: [
+            {
+              label: 'Blocked',
+              data: blocked,
+              borderColor: '#b91c1c',
+              backgroundColor: 'rgba(185, 28, 28, 0.16)',
+              fill: true,
+              tension: 0.34,
+              pointRadius: 0,
+              borderWidth: 2,
+            },
+            {
+              label: 'Passed',
+              data: passed,
+              borderColor: '#15803d',
+              backgroundColor: 'rgba(21, 128, 61, 0.12)',
+              fill: true,
+              tension: 0.34,
+              pointRadius: 0,
+              borderWidth: 2,
+            },
+          ],
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          interaction: { intersect: false, mode: 'index' },
+          plugins: {
+            legend: {
+              labels: {
+                color: '#4a5563',
+                boxWidth: 12,
+                boxHeight: 12,
+              },
+            },
+          },
+          scales: {
+            x: {
+              ticks: { color: '#66727f' },
+              grid: { color: 'rgba(107, 114, 128, 0.18)' },
+            },
+            y: {
+              beginAtZero: true,
+              ticks: { color: '#66727f' },
+              grid: { color: 'rgba(107, 114, 128, 0.18)' },
+            },
+          },
+        },
+      });
+    }
+
+    function renderLogin(error) {
+      if (!app) return;
+      app.innerHTML = '<div class="login-shell">'
+        + '<section class="login-card">'
+        + '<div class="login-kicker">Ryzeon</div>'
+        + '<div class="login-title">Shield Admin Control Center</div>'
+        + '<div class="host-label">Host: ' + esc(SAFE_HOST) + '</div>'
+        + '<form id="loginForm">'
+        + '<div class="field-row"><label class="label" for="adminPass">Password</label><input id="adminPass" class="field" type="password" autocomplete="current-password" placeholder="Enter admin password"></div>'
+        + '<div class="btns" style="margin-top:14px"><button id="loginBtn" class="btn primary" type="submit">Enter Dashboard</button></div>'
+        + '</form>'
+        + '<div class="error" id="loginError">' + esc(error || '') + '</div>'
+        + '</section>'
+        + '</div>';
+
+      const form = document.getElementById('loginForm');
+      const button = document.getElementById('loginBtn');
+      if (!form || !button) return;
+
+      form.onsubmit = async function (ev) {
+        ev.preventDefault();
+        const passEl = document.getElementById('adminPass');
+        const password = passEl ? String(passEl.value || '') : '';
+        const errEl = document.getElementById('loginError');
+        if (errEl) errEl.textContent = '';
+        if (!password) {
+          if (errEl) errEl.textContent = 'Password is required.';
+          return;
+        }
+
+        button.disabled = true;
         try {
-          submit.disabled = true;
-          const action = (document.getElementById('qaAction') || {}).value || 'blacklist';
-          const ip = (document.getElementById('qaIp') || {}).value || '';
-          const reason = (document.getElementById('qaReason') || {}).value || 'Admin action';
-          await submitQuickAction({ action: action, ip: ip, reason: reason });
-          closeModal();
-          toast('Action completed successfully', 'ok');
+          const response = await fetch('/__shield/admin/login', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ password: password }),
+          });
+          let data = {};
+          try {
+            data = await response.json();
+          } catch {
+            data = {};
+          }
+          if (!response.ok || !data.token) {
+            throw new Error(data.error || 'Login failed');
+          }
+
+          setToken(String(data.token));
+          runtimePolicy = null;
+          sitesCache = null;
+          activeTab = 'overview';
+          showToast('Login successful', 'ok');
           await renderDashboard();
-        } catch (e) {
-          toast((e && e.message) || 'Action failed', 'error');
+          startPolling();
+        } catch (err) {
+          if (errEl) errEl.textContent = err && err.message ? err.message : 'Login failed';
+        } finally {
+          button.disabled = false;
+        }
+      };
+    }
+
+    async function runQuickAction(action, ip, reason) {
+      const targetIp = String(ip || '').trim();
+      if (!targetIp) throw new Error('IP is required');
+
+      if (action === 'blacklist') {
+        return api('/__shield/admin/blacklist/add', {
+          method: 'POST',
+          body: JSON.stringify({ ip: targetIp }),
+        });
+      }
+      if (action === 'unblacklist') {
+        return api('/__shield/admin/unblacklist', {
+          method: 'POST',
+          body: JSON.stringify({ ip: targetIp }),
+        });
+      }
+      if (action === 'suspend') {
+        return api('/__shield/admin/ip/suspend', {
+          method: 'POST',
+          body: JSON.stringify({
+            ip: targetIp,
+            reason: String(reason || 'Admin suspend'),
+            permanent: true,
+            durationSeconds: 3600,
+          }),
+        });
+      }
+      if (action === 'unsuspend') {
+        return api('/__shield/admin/ip/unsuspend', {
+          method: 'POST',
+          body: JSON.stringify({ ip: targetIp }),
+        });
+      }
+      throw new Error('Unsupported action');
+    }
+
+    function openQuickActionModal(defaultAction, defaultIp) {
+      openModal('Quick IP Action',
+        '<div class="muted">Apply a moderation command to a target IP address.</div>'
+        + '<div class="field-row"><label class="label" for="qaAction">Action</label>'
+        + '<select id="qaAction" class="field">'
+        + '<option value="blacklist"' + (defaultAction === 'blacklist' ? ' selected' : '') + '>Blacklist IP</option>'
+        + '<option value="unblacklist"' + (defaultAction === 'unblacklist' ? ' selected' : '') + '>Unblacklist IP</option>'
+        + '<option value="suspend"' + (defaultAction === 'suspend' ? ' selected' : '') + '>Suspend IP</option>'
+        + '<option value="unsuspend"' + (defaultAction === 'unsuspend' ? ' selected' : '') + '>Unsuspend IP</option>'
+        + '</select></div>'
+        + '<div class="field-row"><label class="label" for="qaIp">Target IP</label><input id="qaIp" class="field" placeholder="1.2.3.4" value="' + esc(defaultIp || '') + '"></div>'
+        + '<div class="field-row"><label class="label" for="qaReason">Reason (suspend)</label><input id="qaReason" class="field" value="Admin action"></div>'
+        + '<div class="btns" style="margin-top:6px"><button id="qaSubmit" class="btn primary" type="button">Run Action</button><button id="qaCancel" class="btn ghost" type="button">Cancel</button></div>'
+      );
+
+      const submit = document.getElementById('qaSubmit');
+      const cancel = document.getElementById('qaCancel');
+      if (cancel) cancel.onclick = closeModal;
+      if (!submit) return;
+
+      submit.onclick = async function () {
+        const actionEl = document.getElementById('qaAction');
+        const ipEl = document.getElementById('qaIp');
+        const reasonEl = document.getElementById('qaReason');
+        const action = actionEl ? String(actionEl.value || '') : 'blacklist';
+        const ip = ipEl ? String(ipEl.value || '') : '';
+        const reason = reasonEl ? String(reasonEl.value || '') : '';
+
+        submit.disabled = true;
+        try {
+          await runQuickAction(action, ip, reason);
+          closeModal();
+          showToast('Action completed for ' + ip, 'ok');
+          await renderDashboard();
+        } catch (err) {
+          showToast(err && err.message ? err.message : 'Action failed', 'error');
         } finally {
           submit.disabled = false;
         }
       };
     }
-  }
 
-  function bindStaticActions(stats){
-    const tabBtns = app.querySelectorAll('[data-tab]');
-    tabBtns.forEach(function(btn){
-      btn.addEventListener('click', function(){
-        activeTab = String(btn.getAttribute('data-tab') || 'overview');
-        renderDashboard(stats);
-      });
-    });
+    function openAddSiteModal() {
+      openModal('Add Protected Domain',
+        '<div class="muted">Register a domain and origin server for Shield reverse proxy.</div>'
+        + '<div class="field-row"><label class="label" for="siteDomain">Domain</label><input id="siteDomain" class="field" placeholder="app.example.com"></div>'
+        + '<div class="field-row"><label class="label" for="siteOrigin">Origin URL</label><input id="siteOrigin" class="field" placeholder="https://origin.example.com"></div>'
+        + '<div class="field-row"><label class="label" for="siteEmail">Owner email (optional)</label><input id="siteEmail" class="field" placeholder="admin@example.com"></div>'
+        + '<div class="field-row"><label class="label" for="sitePlan">Plan</label><select id="sitePlan" class="field"><option value="free">Free</option><option value="pro">Pro</option><option value="enterprise">Enterprise</option></select></div>'
+        + '<div class="btns" style="margin-top:6px"><button id="siteSubmit" class="btn primary" type="button">Add Domain</button><button id="siteCancel" class="btn ghost" type="button">Cancel</button></div>'
+      );
 
-    const refresh = document.getElementById('refreshBtn');
-    if (refresh) refresh.onclick = function(){ renderDashboard(); };
+      const submit = document.getElementById('siteSubmit');
+      const cancel = document.getElementById('siteCancel');
+      if (cancel) cancel.onclick = closeModal;
+      if (!submit) return;
 
-    const logout = document.getElementById('logoutBtn');
-    if (logout) logout.onclick = async function(){
-      try { await fetch('/__shield/admin/logout', { method: 'POST' }); } catch {}
-      clearToken();
-      renderLogin();
-    };
+      submit.onclick = async function () {
+        const domain = String((document.getElementById('siteDomain') || {}).value || '').trim();
+        const originUrl = String((document.getElementById('siteOrigin') || {}).value || '').trim();
+        const ownerEmail = String((document.getElementById('siteEmail') || {}).value || '').trim();
+        const plan = String((document.getElementById('sitePlan') || {}).value || 'free').trim();
 
-    const quick = document.getElementById('quickActionBtn');
-    if (quick) quick.onclick = function(){ openQuickActionModal('blacklist', ''); };
-
-    const manageIpBtns = app.querySelectorAll('[data-manage-ip]');
-    manageIpBtns.forEach(function(btn){
-      btn.addEventListener('click', function(){
-        openQuickActionModal('blacklist', String(btn.getAttribute('data-manage-ip') || ''));
-      });
-    });
-
-    const quickBtns = app.querySelectorAll('[data-quick-action]');
-    quickBtns.forEach(function(btn){
-      btn.addEventListener('click', function(){
-        openQuickActionModal(String(btn.getAttribute('data-quick-action') || 'blacklist'), '');
-      });
-    });
-
-    const policyToggles = app.querySelectorAll('.policy-toggle');
-    policyToggles.forEach(function(el){
-      el.addEventListener('change', async function(){
-        const key = String(el.getAttribute('data-key') || '');
-        const checked = !!el.checked;
-        try {
-          const r = await api('/__shield/admin/protection', { method: 'POST', body: JSON.stringify({ updates: { [key]: checked } }) });
-          runtimePolicy = r.policy || runtimePolicy;
-          toast('Policy updated: ' + key, 'ok');
-        } catch (e) {
-          el.checked = !checked;
-          toast((e && e.message) || 'Failed to update policy', 'error');
+        if (!domain || !originUrl) {
+          showToast('Domain and origin URL are required', 'error');
+          return;
         }
-      });
-    });
 
-    /* ── Sites tab actions ── */
-    const addSiteBtn = document.getElementById('addSiteBtn');
-    if (addSiteBtn) {
-      addSiteBtn.onclick = function(){
-        openModal(
-          '<div class="muted">Register a new domain to protect via Ryzeon Shield.</div>'
-          + '<label class="muted">Domain (e.g. app.example.com)</label>'
-          + '<input id="siteDomain" class="input" placeholder="app.example.com">'
-          + '<label class="muted">Origin URL (your real server)</label>'
-          + '<input id="siteOrigin" class="input" placeholder="https://123.456.789.0:443">'
-          + '<label class="muted">Owner Email (optional)</label>'
-          + '<input id="siteEmail" class="input" placeholder="admin@example.com">'
-          + '<label class="muted">Plan</label>'
-          + '<select id="sitePlan" class="input"><option value="free">Free</option><option value="pro">Pro</option><option value="enterprise">Enterprise</option></select>'
-          + '<div class="top-actions" style="margin-top:8px"><button id="siteAddSubmit" class="btn">Add Site</button><button id="siteAddCancel" class="btn secondary">Cancel</button></div>'
-        );
-        var siteAddCancel = document.getElementById('siteAddCancel');
-        if (siteAddCancel) siteAddCancel.onclick = closeModal;
-        var siteAddSubmit = document.getElementById('siteAddSubmit');
-        if (siteAddSubmit) {
-          siteAddSubmit.onclick = async function(){
-            try {
-              siteAddSubmit.disabled = true;
-              var domain = (document.getElementById('siteDomain') || {}).value || '';
-              var origin_url = (document.getElementById('siteOrigin') || {}).value || '';
-              var owner_email = (document.getElementById('siteEmail') || {}).value || '';
-              var plan = (document.getElementById('sitePlan') || {}).value || 'free';
-              if (!domain || !origin_url) throw new Error('Domain and origin URL are required');
-              await api('/__shield/admin/sites/add', { method: 'POST', body: JSON.stringify({ domain: domain, origin_url: origin_url, owner_email: owner_email, plan: plan }) });
-              closeModal();
-              toast('Site added: ' + domain, 'ok');
-              sitesData = null;
-              await renderDashboard();
-            } catch (e) {
-              toast((e && e.message) || 'Failed to add site', 'error');
-            } finally {
-              siteAddSubmit.disabled = false;
-            }
-          };
+        submit.disabled = true;
+        try {
+          await api('/__shield/admin/sites/add', {
+            method: 'POST',
+            body: JSON.stringify({ domain: domain, originUrl: originUrl, ownerEmail: ownerEmail, plan: plan }),
+          });
+          closeModal();
+          sitesCache = null;
+          showToast('Site added: ' + domain, 'ok');
+          await renderDashboard();
+        } catch (err) {
+          showToast(err && err.message ? err.message : 'Failed to add site', 'error');
+        } finally {
+          submit.disabled = false;
         }
       };
     }
 
-    var siteToggleBtns = app.querySelectorAll('[data-site-toggle]');
-    siteToggleBtns.forEach(function(btn){
-      btn.addEventListener('click', async function(){
-        var domain = btn.getAttribute('data-site-toggle') || '';
-        var currentActive = btn.getAttribute('data-site-active') === '1';
+    function openRemoveSiteModal(domain) {
+      const value = String(domain || '').trim();
+      if (!value) return;
+      openModal('Remove Protected Domain',
+        '<div class="muted">Remove <strong>' + esc(value) + '</strong> from Shield routing?</div>'
+        + '<div class="empty">This immediately stops proxying traffic for this domain.</div>'
+        + '<div class="btns" style="margin-top:6px"><button id="removeSiteConfirm" class="btn danger" type="button">Remove</button><button id="removeSiteCancel" class="btn ghost" type="button">Cancel</button></div>'
+      );
+
+      const confirm = document.getElementById('removeSiteConfirm');
+      const cancel = document.getElementById('removeSiteCancel');
+      if (cancel) cancel.onclick = closeModal;
+      if (!confirm) return;
+
+      confirm.onclick = async function () {
+        confirm.disabled = true;
         try {
-          btn.disabled = true;
-          await api('/__shield/admin/sites/toggle', { method: 'POST', body: JSON.stringify({ domain: domain, active: !currentActive }) });
-          toast(domain + (currentActive ? ' disabled' : ' enabled'), 'ok');
-          sitesData = null;
+          await api('/__shield/admin/sites/remove', {
+            method: 'POST',
+            body: JSON.stringify({ domain: value }),
+          });
+          closeModal();
+          sitesCache = null;
+          showToast('Site removed: ' + value, 'ok');
           await renderDashboard();
-        } catch (e) {
-          toast((e && e.message) || 'Toggle failed', 'error');
-        } finally { btn.disabled = false; }
-      });
-    });
-
-    var siteRemoveBtns = app.querySelectorAll('[data-site-remove]');
-    siteRemoveBtns.forEach(function(btn){
-      btn.addEventListener('click', function(){
-        var domain = btn.getAttribute('data-site-remove') || '';
-        openModal(
-          '<div class="muted">Are you sure you want to remove <strong>' + esc(domain) + '</strong>?</div>'
-          + '<div class="muted" style="color:var(--bad)">This will stop proxying all traffic for this domain.</div>'
-          + '<div class="top-actions" style="margin-top:10px"><button id="siteRemoveConfirm" class="btn danger">Remove</button><button id="siteRemoveCancel" class="btn secondary">Cancel</button></div>'
-        );
-        var cancelBtn = document.getElementById('siteRemoveCancel');
-        if (cancelBtn) cancelBtn.onclick = closeModal;
-        var confirmBtn = document.getElementById('siteRemoveConfirm');
-        if (confirmBtn) {
-          confirmBtn.onclick = async function(){
-            try {
-              confirmBtn.disabled = true;
-              await api('/__shield/admin/sites/remove', { method: 'POST', body: JSON.stringify({ domain: domain }) });
-              closeModal();
-              toast('Site removed: ' + domain, 'ok');
-              sitesData = null;
-              await renderDashboard();
-            } catch (e) {
-              toast((e && e.message) || 'Remove failed', 'error');
-            } finally { confirmBtn.disabled = false; }
-          };
+        } catch (err) {
+          showToast(err && err.message ? err.message : 'Failed to remove site', 'error');
+        } finally {
+          confirm.disabled = false;
         }
-      });
-    });
-  }
-
-  async function loadPolicyIfNeeded(){
-    if (activeTab !== 'settings') return;
-    if (runtimePolicy) return;
-    try {
-      const data = await api('/__shield/admin/protection');
-      runtimePolicy = data.policy || {};
-    } catch (e) {
-      toast('Could not load policy', 'error');
-      runtimePolicy = {};
+      };
     }
-  }
 
-  async function loadSitesIfNeeded(){
-    if (activeTab !== 'sites') return;
-    try {
-      const data = await api('/__shield/admin/sites');
-      sitesData = data.sites || [];
-    } catch (e) {
-      toast('Could not load sites', 'error');
-      sitesData = [];
-    }
-  }
-
-  async function renderDashboard(seedStats){
-    let stats;
-    try {
-      stats = seedStats || await api('/__shield/admin/dashboard');
-    } catch (e) {
-      if (e.status === 401) {
-        clearToken();
-        return renderLogin('Session expired. Login again.');
+    async function loadPolicyIfNeeded() {
+      if (activeTab !== 'settings') return;
+      if (runtimePolicy) return;
+      try {
+        const data = await api('/__shield/admin/protection');
+        runtimePolicy = data.policy || {};
+      } catch (err) {
+        runtimePolicy = {};
+        showToast('Policy load failed', 'error');
       }
-      return renderLogin((e && e.message) || 'Failed to load dashboard');
     }
 
-    await loadPolicyIfNeeded();
-    await loadSitesIfNeeded();
-
-    let content = '';
-    if (activeTab === 'overview') content = overviewTab(stats);
-    else if (activeTab === 'threats') content = threatsTab(stats);
-    else if (activeTab === 'traffic') content = trafficTab(stats);
-    else if (activeTab === 'topips') content = topIpsTab(stats);
-    else if (activeTab === 'sites') content = sitesTab(sitesData || []);
-    else if (activeTab === 'profile') content = profileTab(stats);
-    else if (activeTab === 'settings') content = settingsTab(runtimePolicy || {});
-    else content = overviewTab(stats);
-
-    app.innerHTML = '<div class="shell">'
-      + rail()
-      + sidebar()
-      + '<main class="main"><div class="wrap">'
-      + topBar()
-      + '<div class="top-actions" style="margin-bottom:12px">'
-      + '<button id="refreshBtn" class="btn">Refresh</button>'
-      + '<button id="quickActionBtn" class="btn secondary">Quick Action</button>'
-      + '<button id="logoutBtn" class="btn secondary">Logout</button>'
-      + '</div>'
-      + content
-      + '</div></main>'
-      + '</div>'
-      + '<div id="modalBackdrop" class="modal-backdrop"><div class="modal"><div class="modal-head"><div class="modal-title">Shield Action</div><button id="modalClose" class="icon-x">✕</button></div><div id="modalBody" class="modal-body"></div></div></div>'
-      + '<div id="toast" class="toast"></div>';
-
-    bindStaticActions(stats);
-
-    if (document.getElementById('bpChart')) {
-      renderLine(stats);
-    } else if (chart) {
-      chart.destroy();
-      chart = null;
+    async function loadSitesIfNeeded() {
+      if (activeTab !== 'sites') return;
+      if (sitesCache) return;
+      try {
+        const data = await api('/__shield/admin/sites');
+        sitesCache = Array.isArray(data.sites) ? data.sites : [];
+      } catch (err) {
+        sitesCache = [];
+        showToast('Site list load failed', 'error');
+      }
     }
-  }
 
-  window.addEventListener('error', function(e){
-    const msg = (e && (e.message || (e.error && e.error.message))) || 'Script error';
-    renderFatal(msg);
-  });
+    function bindEvents(stats) {
+      const tabButtons = app.querySelectorAll('[data-tab]');
+      tabButtons.forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          activeTab = String(btn.getAttribute('data-tab') || 'overview');
+          renderDashboard(stats);
+        });
+      });
 
-  try {
-    renderDashboard(INITIAL_STATS || null);
-    setInterval(function(){ renderDashboard(); }, 5000);
-  } catch (e) {
-    renderFatal((e && e.message) || 'Initialization failed');
-  }
-})();
-</script>
+      const refreshBtn = document.getElementById('refreshBtn');
+      if (refreshBtn) {
+        refreshBtn.onclick = function () {
+          renderDashboard();
+        };
+      }
+
+      const quickActionBtn = document.getElementById('quickActionBtn');
+      if (quickActionBtn) {
+        quickActionBtn.onclick = function () {
+          openQuickActionModal('blacklist', '');
+        };
+      }
+
+      const logoutBtn = document.getElementById('logoutBtn');
+      if (logoutBtn) {
+        logoutBtn.onclick = async function () {
+          try {
+            await fetch('/__shield/admin/logout', { method: 'POST' });
+          } catch {}
+          clearToken();
+          runtimePolicy = null;
+          sitesCache = null;
+          activeTab = 'overview';
+          renderLogin();
+        };
+      }
+
+      const quickButtons = app.querySelectorAll('[data-quick-action]');
+      quickButtons.forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          const action = String(btn.getAttribute('data-quick-action') || 'blacklist');
+          openQuickActionModal(action, '');
+        });
+      });
+
+      const ipManageButtons = app.querySelectorAll('[data-manage-ip]');
+      ipManageButtons.forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          const ip = String(btn.getAttribute('data-manage-ip') || '');
+          openQuickActionModal('blacklist', ip);
+        });
+      });
+
+      const policyToggles = app.querySelectorAll('.policy-toggle');
+      policyToggles.forEach(function (toggle) {
+        toggle.addEventListener('change', async function () {
+          const key = String(toggle.getAttribute('data-key') || '');
+          const checked = !!toggle.checked;
+          try {
+            const result = await api('/__shield/admin/protection', {
+              method: 'POST',
+              body: JSON.stringify({ updates: { [key]: checked } }),
+            });
+            runtimePolicy = result.policy || runtimePolicy;
+            showToast('Policy updated: ' + key, 'ok');
+          } catch (err) {
+            toggle.checked = !checked;
+            showToast(err && err.message ? err.message : 'Policy update failed', 'error');
+          }
+        });
+      });
+
+      const addSiteBtn = document.getElementById('addSiteBtn');
+      if (addSiteBtn) {
+        addSiteBtn.onclick = function () {
+          openAddSiteModal();
+        };
+      }
+
+      const siteToggles = app.querySelectorAll('[data-site-toggle]');
+      siteToggles.forEach(function (btn) {
+        btn.addEventListener('click', async function () {
+          const domain = String(btn.getAttribute('data-site-toggle') || '');
+          const active = String(btn.getAttribute('data-site-active') || '') === '1';
+          btn.disabled = true;
+          try {
+            await api('/__shield/admin/sites/toggle', {
+              method: 'POST',
+              body: JSON.stringify({ domain: domain, active: !active }),
+            });
+            sitesCache = null;
+            showToast(domain + (active ? ' disabled' : ' enabled'), 'ok');
+            await renderDashboard();
+          } catch (err) {
+            showToast(err && err.message ? err.message : 'Toggle failed', 'error');
+          } finally {
+            btn.disabled = false;
+          }
+        });
+      });
+
+      const siteRemovals = app.querySelectorAll('[data-site-remove]');
+      siteRemovals.forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          openRemoveSiteModal(String(btn.getAttribute('data-site-remove') || ''));
+        });
+      });
+    }
+
+    async function renderDashboard(seedStats) {
+      if (!app || rendering) return;
+      rendering = true;
+
+      try {
+        let stats = seedStats || null;
+        if (!stats) {
+          try {
+            stats = await api('/__shield/admin/dashboard');
+          } catch (err) {
+            if (err && err.status === 401) {
+              clearToken();
+              renderLogin('Session expired. Login again.');
+              return;
+            }
+            renderLogin(err && err.message ? err.message : 'Failed to load dashboard');
+            return;
+          }
+        }
+
+        await loadPolicyIfNeeded();
+        await loadSitesIfNeeded();
+
+        app.innerHTML = '<div class="shell">'
+          + sidebar()
+          + '<section class="workspace">'
+          + toolbar(stats)
+          + '<main class="content">' + renderTab(stats) + '</main>'
+          + '</section>'
+          + '</div>';
+
+        bindEvents(stats);
+        drawTrafficChart(stats);
+      } finally {
+        rendering = false;
+      }
+    }
+
+    function startPolling() {
+      if (pollTimer) clearInterval(pollTimer);
+      pollTimer = setInterval(function () {
+        if (document.visibilityState === 'hidden') return;
+        if (document.getElementById('loginForm')) return;
+        renderDashboard();
+      }, 7000);
+    }
+
+    async function bootstrap() {
+      try {
+        if (INITIAL_STATS) {
+          await renderDashboard(INITIAL_STATS);
+        } else {
+          await renderDashboard();
+        }
+      } catch (err) {
+        renderLogin(err && err.message ? err.message : 'Dashboard initialization failed');
+      }
+      startPolling();
+    }
+
+    window.addEventListener('error', function (ev) {
+      const msg = ev && ev.message ? ev.message : 'Unknown runtime error';
+      renderLogin('Client error: ' + msg);
+    });
+
+    bootstrap();
+  })();
+  </script>
 </body>
 </html>`;
 }
