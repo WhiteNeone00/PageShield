@@ -108,6 +108,33 @@ npm install
 npx wrangler login
 ```
 
+## Remote/Headless Deploy (No Browser Login)
+
+If your Worker runs on a remote machine, `wrangler login` may fail because OAuth callback expects `localhost:<port>` on the same device.
+
+Use API token auth instead:
+
+1. Create a Cloudflare API token with Worker deploy permissions.
+2. Set environment variables on the machine:
+
+```bash
+export CLOUDFLARE_API_TOKEN="<your_token>"
+export CLOUDFLARE_ACCOUNT_ID="<your_account_id>"
+```
+
+3. Deploy directly (no browser callback required):
+
+```bash
+npx wrangler deploy
+```
+
+For GitHub auto-deploy, add repository secrets:
+
+- `CLOUDFLARE_API_TOKEN`
+- `CLOUDFLARE_ACCOUNT_ID`
+
+This repo includes a workflow at `.github/workflows/deploy-worker.yml` that deploys on push to `main`.
+
 Set secrets:
 
 ```bash
