@@ -1309,6 +1309,8 @@ export function htmlShieldStats(host, initialStats = null) {
         + '<div class="mini"><div class="k">Anomaly signal weight</div><input id="det_anomalySignalWeight" class="field" type="number" min="0" max="2" step="0.01" value="' + Number(d.anomalySignalWeight || 0.45) + '"></div>'
         + '<div class="mini"><div class="k">Spoof signal weight</div><input id="det_spoofSignalWeight" class="field" type="number" min="0" max="2" step="0.01" value="' + Number(d.spoofSignalWeight || 0.55) + '"></div>'
         + '<div class="mini"><div class="k">Attack memory window seconds</div><input id="det_attackMemoryWindowSeconds" class="field" type="number" min="60" value="' + Number(d.attackMemoryWindowSeconds || 86400) + '"></div>'
+        + '<div class="mini"><div class="k">Header count max</div><input id="det_headerCountMax" class="field" type="number" min="8" value="' + Number(d.headerCountMax || 48) + '"></div>'
+        + '<div class="mini"><div class="k">Cookie header max length</div><input id="det_cookieHeaderMaxLength" class="field" type="number" min="128" value="' + Number(d.cookieHeaderMaxLength || 2500) + '"></div>'
         + '</div>'
         + '<div class="switch-list" style="margin-top:10px">'
         + '<label class="switch"><div><div class="name">SSRF detection</div><div class="desc">Detect internal metadata/localhost callback probes.</div></div><input id="det_enableSsrfDetection" type="checkbox" ' + (d.enableSsrfDetection !== false ? 'checked' : '') + '></label>'
@@ -1319,6 +1321,11 @@ export function htmlShieldStats(host, initialStats = null) {
         + '<label class="switch"><div><div class="name">Request smuggling detection</div><div class="desc">Flag CL+TE and invalid transfer-encoding patterns.</div></div><input id="det_enableRequestSmugglingDetection" type="checkbox" ' + (d.enableRequestSmugglingDetection !== false ? 'checked' : '') + '></label>'
         + '<label class="switch"><div><div class="name">Path spray detection</div><div class="desc">Detect high path diversity scan bursts.</div></div><input id="det_enablePathSprayDetection" type="checkbox" ' + (d.enablePathSprayDetection !== false ? 'checked' : '') + '></label>'
         + '<label class="switch"><div><div class="name">Non-GET burst detection</div><div class="desc">Detect write-heavy bursts from same source.</div></div><input id="det_enableNonGetBurstDetection" type="checkbox" ' + (d.enableNonGetBurstDetection !== false ? 'checked' : '') + '></label>'
+        + '<label class="switch"><div><div class="name">Template injection detection</div><div class="desc">Detect SSTI payload patterns in path/query values.</div></div><input id="det_enableTemplateInjectionDetection" type="checkbox" ' + (d.enableTemplateInjectionDetection !== false ? 'checked' : '') + '></label>'
+        + '<label class="switch"><div><div class="name">Shell payload detection</div><div class="desc">Detect shell chaining and command execution probes.</div></div><input id="det_enableShellPayloadDetection" type="checkbox" ' + (d.enableShellPayloadDetection !== false ? 'checked' : '') + '></label>'
+        + '<label class="switch"><div><div class="name">Method override abuse detection</div><div class="desc">Detect suspicious HTTP method override header abuse.</div></div><input id="det_enableMethodOverrideDetection" type="checkbox" ' + (d.enableMethodOverrideDetection !== false ? 'checked' : '') + '></label>'
+        + '<label class="switch"><div><div class="name">Suspicious cookie detection</div><div class="desc">Detect oversized or malformed cookie header attacks.</div></div><input id="det_enableSuspiciousCookieDetection" type="checkbox" ' + (d.enableSuspiciousCookieDetection !== false ? 'checked' : '') + '></label>'
+        + '<label class="switch"><div><div class="name">Header flood detection</div><div class="desc">Detect header-count abuse used in evasion/flooding.</div></div><input id="det_enableHeaderFloodDetection" type="checkbox" ' + (d.enableHeaderFloodDetection !== false ? 'checked' : '') + '></label>'
         + '</div>'
         + '<div class="field-row"><label class="label" for="det_customScannerUaPatterns">Custom scanner UA patterns (one per line)</label><textarea id="det_customScannerUaPatterns" class="field" rows="4">' + esc(listToText(d.customScannerUaPatterns || [])) + '</textarea></div>'
         + '<div class="field-row"><label class="label" for="det_customAttackPathPatterns">Custom attack/path patterns (one per line)</label><textarea id="det_customAttackPathPatterns" class="field" rows="4">' + esc(listToText(d.customAttackPathPatterns || [])) + '</textarea></div>'
@@ -1808,6 +1815,13 @@ export function htmlShieldStats(host, initialStats = null) {
               enableRequestSmugglingDetection: readBool('det_enableRequestSmugglingDetection', true),
               enablePathSprayDetection: readBool('det_enablePathSprayDetection', true),
               enableNonGetBurstDetection: readBool('det_enableNonGetBurstDetection', true),
+              enableTemplateInjectionDetection: readBool('det_enableTemplateInjectionDetection', true),
+              enableShellPayloadDetection: readBool('det_enableShellPayloadDetection', true),
+              enableMethodOverrideDetection: readBool('det_enableMethodOverrideDetection', true),
+              enableSuspiciousCookieDetection: readBool('det_enableSuspiciousCookieDetection', true),
+              enableHeaderFloodDetection: readBool('det_enableHeaderFloodDetection', true),
+              headerCountMax: readNumber('det_headerCountMax', 48),
+              cookieHeaderMaxLength: readNumber('det_cookieHeaderMaxLength', 2500),
               customScannerUaPatterns: readLines('det_customScannerUaPatterns'),
               customAttackPathPatterns: readLines('det_customAttackPathPatterns'),
               customSqliPatterns: readLines('det_customSqliPatterns'),

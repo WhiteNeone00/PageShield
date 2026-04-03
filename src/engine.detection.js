@@ -36,6 +36,9 @@ const INJECTION_PATTERN_REGEX = /(\$\{jndi:|union(?:\+|\s)select|<script|%3cscri
 const SSRF_PATTERN_REGEX = /(localhost|127\.0\.0\.1|0\.0\.0\.0|169\.254\.169\.254|metadata\.google\.internal|\.[a-z0-9-]+\.internal|\.svc(?:\.cluster\.local)?|\[::1\])/i;
 const GRAPHQL_INTROSPECTION_REGEX = /(?:__schema|__type)\s*(?:\{|\()/i;
 const HEADER_INJECTION_REGEX = /(%0d%0a|\r\n)/i;
+const TEMPLATE_INJECTION_REGEX = /(\{\{[^}]{1,80}\}\}|\$\{[^}]{1,80}\}|<%=?[^%]{1,120}%>|\b(?:__globals__|__mro__|__subclasses__)\b)/i;
+const SHELL_PAYLOAD_REGEX = /((?:;|\|\||&&)\s*(?:cat|ls|id|whoami|uname|curl|wget|bash|sh|powershell|cmd\.exe)\b|\$\([^)]{1,120}\)|`[^`]{1,120}`)/i;
+const METHOD_OVERRIDE_HEADERS = ['x-http-method-override', 'x-method-override', 'x-http-method'];
 const LEARN_TTL_MS = 6 * 60 * 60 * 1000;
 const LEARN_MIN_HITS = 2;
 const UA_STOP_TOKENS = new Set([
@@ -173,6 +176,28 @@ function hasForwardProxyHeaders(request) {
   return false;
 }
 
+function getHeaderCount(headers) {
+  let count = 0;
+  for (const _ of headers) count += 1;
+  return count;
+}
+
+function hasMethodOverrideAbuse(request) {
+  const actualMethod = String(request.method || 'GET').toUpperCase();
+  const dangerousOverrides = new Set(['TRACE', 'TRACK', 'CONNECT', 'DELETE', 'PUT', 'PATCH']);
+
+  for (const headerName of METHOD_OVERRIDE_HEADERS) {
+    const raw = String(request.headers.get(headerName) || '').trim();
+    if (!raw) continue;
+    const overrideMethod = raw.split(',')[0].trim().toUpperCase();
+    if (!overrideMethod) continue;
+    if (dangerousOverrides.has(overrideMethod)) return true;
+    if ((actualMethod === 'GET' || actualMethod === 'HEAD') && overrideMethod !== actualMethod) return true;
+  }
+
+  return false;
+}
+
 function rememberEmergingSignatures(request, signals, nowMs) {
   const ua = String(request.headers.get('user-agent') || '').toLowerCase();
   const org = String(request.cf?.asOrganization || '').toLowerCase();
@@ -199,6 +224,11 @@ function rememberEmergingSignatures(request, signals, nowMs) {
     || attackFlags.includes('GRAPHQL_INTROSPECTION')
     || attackFlags.includes('HEADER_INJECTION')
     || attackFlags.includes('JWT_NONE_ALG')
+    || attackFlags.includes('TEMPLATE_INJECTION')
+    || attackFlags.includes('SHELL_PAYLOAD')
+    || attackFlags.includes('METHOD_OVERRIDE_ABUSE')
+    || attackFlags.includes('COOKIE_ABUSE')
+    || attackFlags.includes('HEADER_FLOOD')
   ) {
     for (const token of uaTokens) bumpLearned(LEARNED.scannerUa, token, nowMs, 2);
   }
@@ -297,11 +327,15 @@ function evaluateScannerHeuristics(request, detection = {}) {
   const rawPath = url.pathname + url.search;
   const fullPath = safeDecode(rawPath).toLowerCase();
   const decodedQuery = safeDecode(url.search).toLowerCase();
+  const mergedPayload = `${fullPath} ${decodedQuery}`;
   const customScannerPatterns = normalizeList(detection.customScannerUaPatterns || []);
   const customAttackPathPatterns = normalizeList(detection.customAttackPathPatterns || []);
   const enableSsrfDetection = detection.enableSsrfDetection !== false;
   const enableGraphqlIntrospectionDetection = detection.enableGraphqlIntrospectionDetection !== false;
   const enableHeaderInjectionDetection = detection.enableHeaderInjectionDetection !== false;
+  const enableTemplateInjectionDetection = detection.enableTemplateInjectionDetection !== false;
+  const enableShellPayloadDetection = detection.enableShellPayloadDetection !== false;
+  const enableMethodOverrideDetection = detection.enableMethodOverrideDetection !== false;
   const hasScannerUa = SCANNER_UA_REGEX.test(ua) || customScannerPatterns.some((p) => ua.includes(p));
   const scannerPath = SCANNER_PATH_REGEX.test(fullPath);
   const injectionLike = INJECTION_PATTERN_REGEX.test(fullPath) || customAttackPathPatterns.some((p) => fullPath.includes(p));
@@ -312,6 +346,9 @@ function evaluateScannerHeuristics(request, detection = {}) {
     && (url.pathname.toLowerCase().includes('/graphql') || decodedQuery.includes('graphql'))
     && GRAPHQL_INTROSPECTION_REGEX.test(decodedQuery);
   const headerInjection = enableHeaderInjectionDetection && HEADER_INJECTION_REGEX.test(rawPath);
+  const templateInjection = enableTemplateInjectionDetection && TEMPLATE_INJECTION_REGEX.test(mergedPayload);
+  const shellPayload = enableShellPayloadDetection && SHELL_PAYLOAD_REGEX.test(mergedPayload);
+  const methodOverrideAbuse = enableMethodOverrideDetection && hasMethodOverrideAbuse(request);
   const encodedTokenCount = (rawPath.match(/%[0-9a-f]{2}/gi) || []).length;
   const queryCount = Array.from(url.searchParams.keys()).length;
 
@@ -322,6 +359,9 @@ function evaluateScannerHeuristics(request, detection = {}) {
   if (ssrfProbe) score += 24;
   if (graphqlIntrospection) score += 20;
   if (headerInjection) score += 22;
+  if (templateInjection) score += 28;
+  if (shellPayload) score += 32;
+  if (methodOverrideAbuse) score += 14;
   if (encodedTokenCount >= 14) score += 8;
   if (queryCount >= 18) score += 12;
 
@@ -333,6 +373,9 @@ function evaluateScannerHeuristics(request, detection = {}) {
     ssrfProbe,
     graphqlIntrospection,
     headerInjection,
+    templateInjection,
+    shellPayload,
+    methodOverrideAbuse,
   };
 }
 
@@ -395,6 +438,8 @@ function evaluateRequestAnomalies(request, detection = {}) {
   const acceptLanguage = String(request.headers.get('accept-language') || '').toLowerCase();
   const hasReferer = !!request.headers.get('referer');
   const xForwardedFor = String(request.headers.get('x-forwarded-for') || '').toLowerCase();
+  const cookieHeader = String(request.headers.get('cookie') || '');
+  const headerCount = getHeaderCount(request.headers);
   const url = new URL(request.url);
   const path = url.pathname.toLowerCase();
   const queryRaw = url.search.startsWith('?') ? url.search.slice(1) : url.search;
@@ -404,6 +449,8 @@ function evaluateRequestAnomalies(request, detection = {}) {
   let authTargetingScore = 0;
   let queryEntropyScore = 0;
   let requestSmugglingSignal = false;
+  let suspiciousCookieSignal = false;
+  let headerFloodSignal = false;
 
   const looksBrowserUa = /\b(mozilla|chrome|safari|firefox|edg|opera)\b/.test(ua);
   const looksChromeLike = /\b(chrome|edg)\b/.test(ua);
@@ -455,6 +502,35 @@ function evaluateRequestAnomalies(request, detection = {}) {
     anomalyScore += queryEntropyScore;
   }
 
+  if (detection.enableSuspiciousCookieDetection !== false) {
+    const cookieHeaderMaxLength = Math.max(128, Number(detection.cookieHeaderMaxLength || 2500));
+    const cookiePairCount = cookieHeader ? cookieHeader.split(';').map((x) => x.trim()).filter(Boolean).length : 0;
+    if (cookieHeader.length > cookieHeaderMaxLength) {
+      anomalyScore += 14;
+      suspiciousCookieSignal = true;
+    }
+    if (cookiePairCount >= 30) {
+      anomalyScore += 8;
+      suspiciousCookieSignal = true;
+    }
+    if (/(%0d|%0a|\r|\n|%00|\x00)/i.test(cookieHeader)) {
+      anomalyScore += 10;
+      suspiciousCookieSignal = true;
+    }
+  }
+
+  if (detection.enableHeaderFloodDetection !== false) {
+    const headerCountMax = Math.max(8, Number(detection.headerCountMax || 48));
+    if (headerCount > headerCountMax) {
+      anomalyScore += 14;
+      headerFloodSignal = true;
+    }
+    if (headerCount > Math.floor(headerCountMax * 1.5)) {
+      anomalyScore += 6;
+      headerFloodSignal = true;
+    }
+  }
+
   const authTargetPath = /\/(login|signin|auth|oauth|token|session|password|reset|verify)\b/i.test(path);
   if (authTargetPath && ['POST', 'PUT', 'PATCH'].includes(method)) {
     authTargetingScore += 8;
@@ -465,7 +541,17 @@ function evaluateRequestAnomalies(request, detection = {}) {
   }
   anomalyScore += Math.min(12, authTargetingScore);
 
-  return { anomalyScore, spoofScore, authTargetingScore, queryEntropyScore, requestSmugglingSignal };
+  return {
+    anomalyScore,
+    spoofScore,
+    authTargetingScore,
+    queryEntropyScore,
+    requestSmugglingSignal,
+    suspiciousCookieSignal,
+    headerFloodSignal,
+    headerCount,
+    cookieHeaderLength: cookieHeader.length,
+  };
 }
 
 export function isCountryBlocked(request, env) {
@@ -548,11 +634,16 @@ export function detectAttackPatterns(request, detection = {}) {
   const rawPath = url.pathname + url.search;
   const fullPath = safeDecode(rawPath).toLowerCase();
   const decodedQuery = safeDecode(url.search).toLowerCase();
+  const mergedPayload = `${fullPath} ${decodedQuery}`;
   const flags = [];
   const ua = (request.headers.get('user-agent') || '').toLowerCase();
+  const cookieHeader = String(request.headers.get('cookie') || '');
+  const headerCount = getHeaderCount(request.headers);
   const customSqliPatterns = normalizeList(detection.customSqliPatterns || []);
   const customXssPatterns = normalizeList(detection.customXssPatterns || []);
   const customAttackPathPatterns = normalizeList(detection.customAttackPathPatterns || []);
+  const cookieHeaderMaxLength = Math.max(128, Number(detection.cookieHeaderMaxLength || 2500));
+  const headerCountMax = Math.max(8, Number(detection.headerCountMax || 48));
 
   if (LISTS.path_traversal_patterns.some(p => fullPath.includes(p)) || customAttackPathPatterns.some((p) => fullPath.includes(p))) flags.push('PATH_TRAVERSAL');
 
@@ -598,6 +689,24 @@ export function detectAttackPatterns(request, detection = {}) {
   }
   if (detection.enableJwtNoneDetection !== false && hasJwtNoneAlgorithm(request)) {
     flags.push('JWT_NONE_ALG');
+  }
+  if (detection.enableTemplateInjectionDetection !== false && TEMPLATE_INJECTION_REGEX.test(mergedPayload)) {
+    flags.push('TEMPLATE_INJECTION');
+  }
+  if (detection.enableShellPayloadDetection !== false && SHELL_PAYLOAD_REGEX.test(mergedPayload)) {
+    flags.push('SHELL_PAYLOAD');
+  }
+  if (detection.enableMethodOverrideDetection !== false && hasMethodOverrideAbuse(request)) {
+    flags.push('METHOD_OVERRIDE_ABUSE');
+  }
+  if (detection.enableSuspiciousCookieDetection !== false) {
+    const cookiePairCount = cookieHeader ? cookieHeader.split(';').map((x) => x.trim()).filter(Boolean).length : 0;
+    if (cookieHeader.length > cookieHeaderMaxLength || cookiePairCount >= 30 || /(%0d|%0a|\r|\n|%00|\x00)/i.test(cookieHeader)) {
+      flags.push('COOKIE_ABUSE');
+    }
+  }
+  if (detection.enableHeaderFloodDetection !== false && headerCount > headerCountMax) {
+    flags.push('HEADER_FLOOD');
   }
 
   return flags;
@@ -660,8 +769,13 @@ export function buildDetectionSignals(request, ip, nowMs, behaviorRisk = {}, pol
     || requestAnomalies.spoofScore >= 10
     || requestAnomalies.anomalyScore >= 13
     || requestAnomalies.requestSmugglingSignal
+    || requestAnomalies.suspiciousCookieSignal
+    || requestAnomalies.headerFloodSignal
     || requestAnomalies.authTargetingScore >= 12
-    || scannerHeuristics.headerInjection;
+    || scannerHeuristics.headerInjection
+    || scannerHeuristics.templateInjection
+    || scannerHeuristics.shellPayload
+    || scannerHeuristics.methodOverrideAbuse;
   const headless = isHeadless(request);
   const vpn = isVpnProxy(request, nowMs, customVpnHints) || datacenterAutomation;
   const aiCrawler = isAiCrawler(request, nowMs, customAiPatterns)
@@ -735,11 +849,18 @@ export function buildDetectionSignals(request, ip, nowMs, behaviorRisk = {}, pol
     authTargetingScore: requestAnomalies.authTargetingScore,
     queryEntropyScore: requestAnomalies.queryEntropyScore,
     requestSmugglingSignal: requestAnomalies.requestSmugglingSignal,
+    suspiciousCookieSignal: requestAnomalies.suspiciousCookieSignal,
+    headerFloodSignal: requestAnomalies.headerFloodSignal,
+    headerCount: requestAnomalies.headerCount,
+    cookieHeaderLength: requestAnomalies.cookieHeaderLength,
     patternScore: requestPattern.patternScore,
     identicalPathBurst: requestPattern.identicalPathBurst,
     paramEnumeration: requestPattern.paramEnumeration,
     pathSpray: requestPattern.pathSpray,
     nonGetBurst: requestPattern.nonGetBurst,
+    templateInjection: scannerHeuristics.templateInjection,
+    shellPayload: scannerHeuristics.shellPayload,
+    methodOverrideAbuse: scannerHeuristics.methodOverrideAbuse,
   };
 
   // Learn only from stronger confidence outcomes to avoid noisy poisoning.
@@ -753,6 +874,11 @@ export function buildDetectionSignals(request, ip, nowMs, behaviorRisk = {}, pol
     || result.requestSmugglingSignal
     || result.authTargetingScore >= 14
     || result.ssrfProbe
+    || result.templateInjection
+    || result.shellPayload
+    || result.methodOverrideAbuse
+    || result.suspiciousCookieSignal
+    || result.headerFloodSignal
   ) {
     rememberEmergingSignatures(request, result, nowMs);
   }
@@ -792,9 +918,12 @@ export function computeThreatScore(request, signals, policy = {}) {
     scannerHeuristicScore = 0,
     anomalyScore = 0, spoofScore = 0,
     authTargetingScore = 0, queryEntropyScore = 0, requestSmugglingSignal = false,
+    suspiciousCookieSignal = false, headerFloodSignal = false,
+    headerCount = 0, cookieHeaderLength = 0,
     identicalPathBurst = false, paramEnumeration = false,
     pathSpray = false, nonGetBurst = false,
     ssrfProbe = false, graphqlIntrospection = false, headerInjection = false,
+    templateInjection = false, shellPayload = false, methodOverrideAbuse = false,
   } = signals || {};
 
   // ── UA Score ──
@@ -821,6 +950,11 @@ export function computeThreatScore(request, signals, policy = {}) {
   if (fpHardBlocked) behaviorScore += 20;
   if (requestSmugglingSignal) behaviorScore += 12;
   if (ssrfProbe) behaviorScore += 10;
+  if (templateInjection) behaviorScore += 10;
+  if (shellPayload) behaviorScore += 12;
+  if (methodOverrideAbuse) behaviorScore += 8;
+  if (suspiciousCookieSignal) behaviorScore += 8;
+  if (headerFloodSignal) behaviorScore += 10;
   if (!request.headers.get('accept-language')) behaviorScore += 6;
   if (!request.headers.get('accept')) behaviorScore += 6;
   if (!request.headers.get('accept-encoding')) behaviorScore += 4;
@@ -843,6 +977,9 @@ export function computeThreatScore(request, signals, policy = {}) {
   if (asnBurst) networkScore += 10;
   networkScore += Math.min(20, tlsScore);
   if (requestSmugglingSignal) networkScore += 8;
+  if (headerFloodSignal) networkScore += 6;
+  if (headerCount >= 64) networkScore += 4;
+  if (cookieHeaderLength >= 4096) networkScore += 6;
   if (request.cf?.botManagement?.score !== undefined) {
     const botScore = request.cf.botManagement.score;
     if (botScore < 20) networkScore += 25;
@@ -884,8 +1021,15 @@ export function computeThreatScore(request, signals, policy = {}) {
   if (attackFlags.includes('GRAPHQL_INTROSPECTION')) attackScore += 16;
   if (attackFlags.includes('HEADER_INJECTION')) attackScore += 22;
   if (attackFlags.includes('JWT_NONE_ALG')) attackScore += 30;
+  if (attackFlags.includes('TEMPLATE_INJECTION')) attackScore += 28;
+  if (attackFlags.includes('SHELL_PAYLOAD')) attackScore += 36;
+  if (attackFlags.includes('METHOD_OVERRIDE_ABUSE')) attackScore += 18;
+  if (attackFlags.includes('COOKIE_ABUSE')) attackScore += 16;
+  if (attackFlags.includes('HEADER_FLOOD')) attackScore += 14;
   if (headerInjection) attackScore += 8;
   if (graphqlIntrospection) attackScore += 6;
+  if (templateInjection) attackScore += 8;
+  if (shellPayload) attackScore += 10;
 
   // ── Pattern Score ──
   patternScore += (signals.patternScore || 0);
@@ -935,12 +1079,14 @@ export function determineEscalation(threatScore, signals, policy = {}) {
   if (signals.isBotFarm) return 'block';
   if (signals.fpHardBlocked) return 'block';
   if (signals.requestSmugglingSignal && (signals.attackFlags || []).length > 0) return 'block';
+  if (signals.shellPayload && (signals.attackFlags || []).length > 0) return 'block';
   if (signals.spoofScore >= 24 && signals.scannerSignalScore >= 40) return 'block';
 
   // high → PoW challenge (hard difficulty)
   if (threatScore >= powHardThreshold) return 'pow-hard';
   if (signals.asnBurst && (signals.spam || signals.fpSpam)) return 'pow-hard';
   if (signals.authTargetingScore >= 14 && signals.spoofScore >= 12) return 'pow-hard';
+  if (signals.templateInjection || signals.methodOverrideAbuse || signals.headerFloodSignal) return 'pow-hard';
 
   // medium → standard PoW challenge
   if (threatScore >= powThreshold) return 'pow';

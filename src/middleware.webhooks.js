@@ -255,9 +255,23 @@ export async function sendDiscordWebhook(env, eventType, reason, details) {
   const displayReason = compactWebhookReason(reason);
 
   // Count how many detections triggered
-  const detectionCount = [details._suspicious, details._headless, details._vpn, details._aiCrawler,
-    details._ddosSuspect, details._spam, details._isBotFarm, details._fpSpam, details._fpHardBlocked,
-    (details._attackFlags?.length > 0)].filter(Boolean).length;
+  const attackFlagCount = Array.isArray(details._attackFlags) ? details._attackFlags.length : 0;
+  const detectionCount = [
+    details._suspicious,
+    details._headless,
+    details._vpn,
+    details._aiCrawler,
+    details._ddosSuspect,
+    details._spam,
+    details._isBotFarm,
+    details._fpSpam,
+    details._fpHardBlocked,
+    details._requestSmugglingSignal,
+    details._pathSpray,
+    details._nonGetBurst,
+    Number(details._headerCount || 0) > 48,
+    Number(details._cookieHeaderLength || 0) > 2500,
+  ].filter(Boolean).length + attackFlagCount;
 
   // ANSI helpers for Discord ```ansi blocks
   const A = {
@@ -362,11 +376,13 @@ export async function sendDiscordWebhook(env, eventType, reason, details) {
     return value + ' '.repeat(pad);
   };
 
-  if (score > 0 && !isDeployEvent) {
+  if (!isDeployEvent) {
     const hps = Number(details._headerPresenceScore || 0);
     const tlsS = Number(details._tlsScore || 0);
     const patS = Number(details._patternScore || 0);
     const ipRate = Number(details._ipRate || 0);
+    const headerCount = Number(details._headerCount || 0);
+    const cookieHeaderLength = Number(details._cookieHeaderLength || 0);
     const mark = (on) => on ? `${A.bRed}■${A.reset}` : `${A.green}□${A.reset}`;
     const scanItem = (label, on) => `${mark(on)} ${(on ? A.white : A.gray)}${label}${A.reset}`;
     const scanLines = [
@@ -385,13 +401,21 @@ export async function sendDiscordWebhook(env, eventType, reason, details) {
         ? `${A.white}Rate${A.reset}  ${ipRate > 10 ? A.bRed : A.cyan}${ipRate}/10s${A.reset}`
         : `${A.white}Rate${A.reset}  ${A.green}0/10s${A.reset}`,
       tlsS > 0
-        ? `${A.white}TLS${A.reset}  ${A.yellow}+${tlsS}${A.reset}`
-        : (patS > 0 ? `${A.white}Pattern${A.reset}  ${A.yellow}+${patS}${A.reset}` : ''),
+        ? `${A.white}TLS/Pattern${A.reset}  ${A.yellow}+${tlsS}${A.reset}`
+        : (patS > 0 ? `${A.white}TLS/Pattern${A.reset}  ${A.yellow}+${patS}${A.reset}` : `${A.white}TLS/Pattern${A.reset}  ${A.green}0${A.reset}`),
+      `${A.white}Header Count${A.reset}  ${headerCount > 48 ? A.bRed : A.cyan}${headerCount}${A.reset}`,
+      `${A.white}Cookie Len${A.reset}  ${cookieHeaderLength > 2500 ? A.bRed : A.cyan}${cookieHeaderLength}${A.reset}`,
     ];
 
-    const combinedLines = scanLines.map((left, i) => ansiPadEnd(left, scanSectionWidth) + ' '.repeat(scanFactorsGap) + (factorLines[i] || ''));
+    const rowCount = Math.max(scanLines.length, factorLines.length);
+    const combinedLines = [];
+    for (let i = 0; i < rowCount; i++) {
+      const left = scanLines[i] || '';
+      const right = factorLines[i] || '';
+      combinedLines.push(ansiPadEnd(left, scanSectionWidth) + ' '.repeat(scanFactorsGap) + right);
+    }
     fields.push({
-      name: `🔍 Scan Results  ·  ${detectionCount} detection${detectionCount !== 1 ? 's' : ''}                                      📊 Factors`,
+      name: `🔍 Scan Results · ${detectionCount} detection${detectionCount !== 1 ? 's' : ''} · 📊 Factors`,
       value: '```ansi\n' + combinedLines.join('\n') + '\n```',
       inline: false,
     });
@@ -412,11 +436,18 @@ export async function sendDiscordWebhook(env, eventType, reason, details) {
   }
 
   // Bottom details (Status + Reason + Signals + Penalty in one spaced block)
-  if (!isDeployEvent && (flags.length > 0 || details._penaltyLabel || reason)) {
+  if (!isDeployEvent) {
+    const maxFlagLines = 4;
+    const normalizedFlags = flags.map((f) => clip(String(f || '').replace(/^\s*•\s*/g, ''), 20));
+    const visibleFlags = normalizedFlags.slice(0, maxFlagLines).map((f) => `• ${f}`);
+    if (normalizedFlags.length > maxFlagLines) {
+      visibleFlags.push(`• +${normalizedFlags.length - maxFlagLines} more`);
+    }
+
     const leftLines = [
       `${statusBadge}`,
-      `💬 ${clip(displayReason, 22)}`,
-      ...(flags.length > 0 ? [flags.map(f => `• ${clip(f, 22)}`).join(' | ')] : ['• None']),
+      `💬 ${clip(displayReason, 20)}`,
+      ...(visibleFlags.length > 0 ? visibleFlags : ['• None']),
     ];
 
     const untilPretty = details._penaltyPermanent
@@ -435,19 +466,18 @@ export async function sendDiscordWebhook(env, eventType, reason, details) {
         })();
 
     const rightLines = [
-      `Duration: ${details._penaltyLabel || 'none'}`,
-      `Expires: ${details._penaltyLabel ? untilPretty : 'N/A'}`,
+      `Duration: ${clip(details._penaltyLabel || 'none', 20)}`,
+      `Expires: ${clip(details._penaltyLabel ? untilPretty : 'N/A', 20)}`,
     ];
 
     const bottomLines = [];
-    const leftWidth = 22;
-    const rowGap = '  ';
-    const headerGap = '                 ';
+    const leftWidth = 24;
+    const rowGap = '  |  ';
     const rows = Math.max(leftLines.length, rightLines.length);
-    bottomLines.push(`${A.bCyan}     Stats${A.reset}`.padEnd(leftWidth, ' ') + headerGap + `${A.bYellow}Penalty${A.reset}`);
+    bottomLines.push(`${A.bCyan}Stats${A.reset}`.padEnd(leftWidth, ' ') + rowGap + `${A.bYellow}Penalty${A.reset}`);
     for (let i = 0; i < rows; i++) {
-      const left = (leftLines[i] || '').padEnd(leftWidth, ' ');
-      const right = rightLines[i] || '';
+      const left = clip(leftLines[i] || '', leftWidth).padEnd(leftWidth, ' ');
+      const right = clip(rightLines[i] || '', 28);
       bottomLines.push(left + rowGap + right);
     }
 
