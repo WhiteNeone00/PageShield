@@ -6,9 +6,11 @@ account_id = "1f6a47bf7e2f4a9b77a90d9fa47294e1"
 version_metadata = { binding = "SHIELD_VERSION_METADATA" }
 
 # Route coverage:
+# - Explicitly pin eu-api host to this worker
 # - Protect all on ryzeon.wtf/*
 # - Protect all on *.ryzeon.wtf/*
 routes = [
+  { pattern = "eu-api.ryzeon.wtf/*", zone_name = "ryzeon.wtf" },
   { pattern = "ryzeon.wtf/*", zone_name = "ryzeon.wtf" },
   { pattern = "*.ryzeon.wtf/*", zone_name = "ryzeon.wtf" },
 ]
