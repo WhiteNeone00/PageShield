@@ -285,9 +285,9 @@ export async function sendDiscordWebhook(env, eventType, reason, details) {
     const parsed = Number.parseInt(String(value ?? ''), 10);
     return Number.isFinite(parsed) ? parsed : fallback;
   };
-  const scanPairWidth = toInt(env?.WEBHOOK_SCAN_PAIR_WIDTH, 17);
+  const scanPairWidth = toInt(env?.WEBHOOK_SCAN_PAIR_WIDTH, 18);
   const scanSectionWidth = toInt(env?.WEBHOOK_SCAN_SECTION_WIDTH, 35);
-  const scanFactorsGap = Math.max(1, toInt(env?.WEBHOOK_SCAN_FACTORS_GAP, 1));
+  const scanFactorsGap = Math.max(3, toInt(env?.WEBHOOK_SCAN_FACTORS_GAP, 4));
   // Edge status
   const hasAttack = (details._attackFlags?.length > 0);
   const edgeOk = eventType !== 'ERROR';
@@ -390,6 +390,9 @@ export async function sendDiscordWebhook(env, eventType, reason, details) {
       `${ansiPadEnd(scanItem('VPN/Proxy', details._vpn), scanPairWidth)} ${scanItem('AI Crawl', details._aiCrawler)}`,
       `${ansiPadEnd(scanItem('DDoS', details._ddosSuspect), scanPairWidth)} ${scanItem('Rate Lim', details._spam)}`,
       `${ansiPadEnd(scanItem('Bot Farm', details._isBotFarm), scanPairWidth)} ${scanItem('Attack', hasAttack)}`,
+      `${ansiPadEnd(scanItem('Smuggle', details._requestSmugglingSignal), scanPairWidth)} ${scanItem('Cookie Abuse', Number(details._cookieHeaderLength || 0) > 2500)}`,
+      `${ansiPadEnd(scanItem('ProtoPoll', details._prototypePollution), scanPairWidth)} ${scanItem('Deserialize', details._deserializationProbe)}`,
+      `${ansiPadEnd(scanItem('Open Redirect', details._openRedirectProbe), scanPairWidth)} ${scanItem('Hdr Flood', Number(details._headerCount || 0) > 48)}`,
     ];
 
     const factorLines = [
@@ -415,7 +418,7 @@ export async function sendDiscordWebhook(env, eventType, reason, details) {
       combinedLines.push(ansiPadEnd(left, scanSectionWidth) + ' '.repeat(scanFactorsGap) + right);
     }
     fields.push({
-      name: `🔍 Scan Results · ${detectionCount} detection${detectionCount !== 1 ? 's' : ''} · 📊 Factors`,
+      name: `🔍 Scan Results  ·  ${detectionCount} detection${detectionCount !== 1 ? 's' : ''}  ·  📊 Factors`,
       value: '```ansi\n' + combinedLines.join('\n') + '\n```',
       inline: false,
     });
@@ -427,6 +430,9 @@ export async function sendDiscordWebhook(env, eventType, reason, details) {
       `${ansiPadEnd(scanItem('VPN/Proxy', details._vpn), scanPairWidth)} ${scanItem('AI Crawl', details._aiCrawler)}`,
       `${ansiPadEnd(scanItem('DDoS', details._ddosSuspect), scanPairWidth)} ${scanItem('Rate Lim', details._spam)}`,
       `${ansiPadEnd(scanItem('Bot Farm', details._isBotFarm), scanPairWidth)} ${scanItem('Attack', hasAttack)}`,
+      `${ansiPadEnd(scanItem('Smuggle', details._requestSmugglingSignal), scanPairWidth)} ${scanItem('Cookie Abuse', Number(details._cookieHeaderLength || 0) > 2500)}`,
+      `${ansiPadEnd(scanItem('ProtoPoll', details._prototypePollution), scanPairWidth)} ${scanItem('Deserialize', details._deserializationProbe)}`,
+      `${ansiPadEnd(scanItem('Open Redirect', details._openRedirectProbe), scanPairWidth)} ${scanItem('Hdr Flood', Number(details._headerCount || 0) > 48)}`,
     ];
     fields.push({
       name: `🔍 Scan Results  ·  ${detectionCount} detection${detectionCount !== 1 ? 's' : ''}`,
@@ -472,7 +478,7 @@ export async function sendDiscordWebhook(env, eventType, reason, details) {
 
     const bottomLines = [];
     const leftWidth = 24;
-    const rowGap = '  |  ';
+    const rowGap = '     ';
     const rows = Math.max(leftLines.length, rightLines.length);
     bottomLines.push(`${A.bCyan}Stats${A.reset}`.padEnd(leftWidth, ' ') + rowGap + `${A.bYellow}Penalty${A.reset}`);
     for (let i = 0; i < rows; i++) {

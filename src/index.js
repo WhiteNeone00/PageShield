@@ -522,6 +522,7 @@ export default {
       authTargetingScore, queryEntropyScore, requestSmugglingSignal,
       pathSpray, nonGetBurst,
       headerCount, cookieHeaderLength,
+      prototypePollution, deserializationProbe, openRedirectProbe,
     } = signals;
     const runtimeVpnProxy = vpnProxy || runtimePolicy.extraVpnHints.some((hint) => String(asOrg || '').toLowerCase().includes(hint));
     const baseThreatScore = computeThreatScore(request, signals, runtimePolicy);
@@ -553,6 +554,9 @@ export default {
       _authTargetingScore: authTargetingScore,
       _queryEntropyScore: queryEntropyScore,
       _requestSmugglingSignal: requestSmugglingSignal,
+      _prototypePollution: prototypePollution,
+      _deserializationProbe: deserializationProbe,
+      _openRedirectProbe: openRedirectProbe,
       _headerCount: headerCount,
       _cookieHeaderLength: cookieHeaderLength,
       _pathSpray: pathSpray,

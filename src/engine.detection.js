@@ -38,7 +38,13 @@ const GRAPHQL_INTROSPECTION_REGEX = /(?:__schema|__type)\s*(?:\{|\()/i;
 const HEADER_INJECTION_REGEX = /(%0d%0a|\r\n)/i;
 const TEMPLATE_INJECTION_REGEX = /(\{\{[^}]{1,80}\}\}|\$\{[^}]{1,80}\}|<%=?[^%]{1,120}%>|\b(?:__globals__|__mro__|__subclasses__)\b)/i;
 const SHELL_PAYLOAD_REGEX = /((?:;|\|\||&&)\s*(?:cat|ls|id|whoami|uname|curl|wget|bash|sh|powershell|cmd\.exe)\b|\$\([^)]{1,120}\)|`[^`]{1,120}`)/i;
+const PROTOTYPE_POLLUTION_REGEX = /(?:__proto__|constructor(?:\.|\[)?prototype|prototype\[[^\]]+\]|constructor\[[^\]]*prototype)/i;
+const DESERIALIZATION_REGEX = /(?:rO0AB|ACED0005|ysoserial|java\.lang\.runtime|getruntime\(|(?:^|[?&])(?:payload|data|object)=o(?::|%3a)\d+|__wakeup\(|__destruct\()/i;
 const METHOD_OVERRIDE_HEADERS = ['x-http-method-override', 'x-method-override', 'x-http-method'];
+const OPEN_REDIRECT_PARAM_KEYS = new Set([
+  'redirect', 'redir', 'url', 'next', 'return', 'return_to', 'returnurl',
+  'dest', 'destination', 'continue', 'callback', 'to', 'out',
+]);
 const LEARN_TTL_MS = 6 * 60 * 60 * 1000;
 const LEARN_MIN_HITS = 2;
 const UA_STOP_TOKENS = new Set([
@@ -198,6 +204,29 @@ function hasMethodOverrideAbuse(request) {
   return false;
 }
 
+function hasOpenRedirectProbe(url) {
+  if (!url || !url.searchParams) return false;
+
+  for (const [rawKey, rawValue] of url.searchParams.entries()) {
+    const key = String(rawKey || '').trim().toLowerCase();
+    if (!OPEN_REDIRECT_PARAM_KEYS.has(key)) continue;
+
+    const raw = String(rawValue || '').trim();
+    if (!raw) continue;
+
+    const decoded = safeDecode(raw).trim().toLowerCase();
+    const normalizedRaw = raw.toLowerCase();
+
+    if (decoded.startsWith('http://') || decoded.startsWith('https://')) return true;
+    if (decoded.startsWith('//') || decoded.startsWith('\\\\')) return true;
+    if (decoded.startsWith('javascript:') || decoded.startsWith('data:')) return true;
+    if (normalizedRaw.startsWith('%2f%2f') || normalizedRaw.startsWith('%5c%5c')) return true;
+    if (decoded.includes('@') && (decoded.includes('http://') || decoded.includes('https://') || decoded.startsWith('//'))) return true;
+  }
+
+  return false;
+}
+
 function rememberEmergingSignatures(request, signals, nowMs) {
   const ua = String(request.headers.get('user-agent') || '').toLowerCase();
   const org = String(request.cf?.asOrganization || '').toLowerCase();
@@ -226,6 +255,9 @@ function rememberEmergingSignatures(request, signals, nowMs) {
     || attackFlags.includes('JWT_NONE_ALG')
     || attackFlags.includes('TEMPLATE_INJECTION')
     || attackFlags.includes('SHELL_PAYLOAD')
+    || attackFlags.includes('PROTOTYPE_POLLUTION')
+    || attackFlags.includes('OPEN_REDIRECT_PROBE')
+    || attackFlags.includes('DESERIALIZATION_PROBE')
     || attackFlags.includes('METHOD_OVERRIDE_ABUSE')
     || attackFlags.includes('COOKIE_ABUSE')
     || attackFlags.includes('HEADER_FLOOD')
@@ -348,6 +380,9 @@ function evaluateScannerHeuristics(request, detection = {}) {
   const headerInjection = enableHeaderInjectionDetection && HEADER_INJECTION_REGEX.test(rawPath);
   const templateInjection = enableTemplateInjectionDetection && TEMPLATE_INJECTION_REGEX.test(mergedPayload);
   const shellPayload = enableShellPayloadDetection && SHELL_PAYLOAD_REGEX.test(mergedPayload);
+  const prototypePollution = PROTOTYPE_POLLUTION_REGEX.test(mergedPayload);
+  const deserializationProbe = DESERIALIZATION_REGEX.test(mergedPayload);
+  const openRedirectProbe = hasOpenRedirectProbe(url);
   const methodOverrideAbuse = enableMethodOverrideDetection && hasMethodOverrideAbuse(request);
   const encodedTokenCount = (rawPath.match(/%[0-9a-f]{2}/gi) || []).length;
   const queryCount = Array.from(url.searchParams.keys()).length;
@@ -361,6 +396,9 @@ function evaluateScannerHeuristics(request, detection = {}) {
   if (headerInjection) score += 22;
   if (templateInjection) score += 28;
   if (shellPayload) score += 32;
+  if (prototypePollution) score += 24;
+  if (deserializationProbe) score += 30;
+  if (openRedirectProbe) score += 14;
   if (methodOverrideAbuse) score += 14;
   if (encodedTokenCount >= 14) score += 8;
   if (queryCount >= 18) score += 12;
@@ -375,6 +413,9 @@ function evaluateScannerHeuristics(request, detection = {}) {
     headerInjection,
     templateInjection,
     shellPayload,
+    prototypePollution,
+    deserializationProbe,
+    openRedirectProbe,
     methodOverrideAbuse,
   };
 }
@@ -642,6 +683,9 @@ export function detectAttackPatterns(request, detection = {}) {
   const customSqliPatterns = normalizeList(detection.customSqliPatterns || []);
   const customXssPatterns = normalizeList(detection.customXssPatterns || []);
   const customAttackPathPatterns = normalizeList(detection.customAttackPathPatterns || []);
+  const prototypePollution = PROTOTYPE_POLLUTION_REGEX.test(mergedPayload);
+  const deserializationProbe = DESERIALIZATION_REGEX.test(mergedPayload);
+  const openRedirectProbe = hasOpenRedirectProbe(url);
   const cookieHeaderMaxLength = Math.max(128, Number(detection.cookieHeaderMaxLength || 2500));
   const headerCountMax = Math.max(8, Number(detection.headerCountMax || 48));
 
@@ -695,6 +739,15 @@ export function detectAttackPatterns(request, detection = {}) {
   }
   if (detection.enableShellPayloadDetection !== false && SHELL_PAYLOAD_REGEX.test(mergedPayload)) {
     flags.push('SHELL_PAYLOAD');
+  }
+  if (prototypePollution) {
+    flags.push('PROTOTYPE_POLLUTION');
+  }
+  if (openRedirectProbe) {
+    flags.push('OPEN_REDIRECT_PROBE');
+  }
+  if (deserializationProbe) {
+    flags.push('DESERIALIZATION_PROBE');
   }
   if (detection.enableMethodOverrideDetection !== false && hasMethodOverrideAbuse(request)) {
     flags.push('METHOD_OVERRIDE_ABUSE');
@@ -775,6 +828,8 @@ export function buildDetectionSignals(request, ip, nowMs, behaviorRisk = {}, pol
     || scannerHeuristics.headerInjection
     || scannerHeuristics.templateInjection
     || scannerHeuristics.shellPayload
+    || scannerHeuristics.prototypePollution
+    || scannerHeuristics.deserializationProbe
     || scannerHeuristics.methodOverrideAbuse;
   const headless = isHeadless(request);
   const vpn = isVpnProxy(request, nowMs, customVpnHints) || datacenterAutomation;
@@ -860,6 +915,9 @@ export function buildDetectionSignals(request, ip, nowMs, behaviorRisk = {}, pol
     nonGetBurst: requestPattern.nonGetBurst,
     templateInjection: scannerHeuristics.templateInjection,
     shellPayload: scannerHeuristics.shellPayload,
+    prototypePollution: scannerHeuristics.prototypePollution,
+    deserializationProbe: scannerHeuristics.deserializationProbe,
+    openRedirectProbe: scannerHeuristics.openRedirectProbe,
     methodOverrideAbuse: scannerHeuristics.methodOverrideAbuse,
   };
 
@@ -876,6 +934,9 @@ export function buildDetectionSignals(request, ip, nowMs, behaviorRisk = {}, pol
     || result.ssrfProbe
     || result.templateInjection
     || result.shellPayload
+    || result.prototypePollution
+    || result.deserializationProbe
+    || result.openRedirectProbe
     || result.methodOverrideAbuse
     || result.suspiciousCookieSignal
     || result.headerFloodSignal
@@ -923,7 +984,9 @@ export function computeThreatScore(request, signals, policy = {}) {
     identicalPathBurst = false, paramEnumeration = false,
     pathSpray = false, nonGetBurst = false,
     ssrfProbe = false, graphqlIntrospection = false, headerInjection = false,
-    templateInjection = false, shellPayload = false, methodOverrideAbuse = false,
+    templateInjection = false, shellPayload = false,
+    prototypePollution = false, deserializationProbe = false, openRedirectProbe = false,
+    methodOverrideAbuse = false,
   } = signals || {};
 
   // ── UA Score ──
@@ -952,6 +1015,9 @@ export function computeThreatScore(request, signals, policy = {}) {
   if (ssrfProbe) behaviorScore += 10;
   if (templateInjection) behaviorScore += 10;
   if (shellPayload) behaviorScore += 12;
+  if (prototypePollution) behaviorScore += 10;
+  if (deserializationProbe) behaviorScore += 12;
+  if (openRedirectProbe) behaviorScore += 6;
   if (methodOverrideAbuse) behaviorScore += 8;
   if (suspiciousCookieSignal) behaviorScore += 8;
   if (headerFloodSignal) behaviorScore += 10;
@@ -1023,6 +1089,9 @@ export function computeThreatScore(request, signals, policy = {}) {
   if (attackFlags.includes('JWT_NONE_ALG')) attackScore += 30;
   if (attackFlags.includes('TEMPLATE_INJECTION')) attackScore += 28;
   if (attackFlags.includes('SHELL_PAYLOAD')) attackScore += 36;
+  if (attackFlags.includes('PROTOTYPE_POLLUTION')) attackScore += 22;
+  if (attackFlags.includes('OPEN_REDIRECT_PROBE')) attackScore += 12;
+  if (attackFlags.includes('DESERIALIZATION_PROBE')) attackScore += 30;
   if (attackFlags.includes('METHOD_OVERRIDE_ABUSE')) attackScore += 18;
   if (attackFlags.includes('COOKIE_ABUSE')) attackScore += 16;
   if (attackFlags.includes('HEADER_FLOOD')) attackScore += 14;
@@ -1030,6 +1099,9 @@ export function computeThreatScore(request, signals, policy = {}) {
   if (graphqlIntrospection) attackScore += 6;
   if (templateInjection) attackScore += 8;
   if (shellPayload) attackScore += 10;
+  if (prototypePollution) attackScore += 6;
+  if (deserializationProbe) attackScore += 8;
+  if (openRedirectProbe) attackScore += 4;
 
   // ── Pattern Score ──
   patternScore += (signals.patternScore || 0);
@@ -1080,12 +1152,14 @@ export function determineEscalation(threatScore, signals, policy = {}) {
   if (signals.fpHardBlocked) return 'block';
   if (signals.requestSmugglingSignal && (signals.attackFlags || []).length > 0) return 'block';
   if (signals.shellPayload && (signals.attackFlags || []).length > 0) return 'block';
+  if (signals.deserializationProbe && (signals.attackFlags || []).length > 0) return 'block';
   if (signals.spoofScore >= 24 && signals.scannerSignalScore >= 40) return 'block';
 
   // high → PoW challenge (hard difficulty)
   if (threatScore >= powHardThreshold) return 'pow-hard';
   if (signals.asnBurst && (signals.spam || signals.fpSpam)) return 'pow-hard';
   if (signals.authTargetingScore >= 14 && signals.spoofScore >= 12) return 'pow-hard';
+  if (signals.prototypePollution && signals.spoofScore >= 14) return 'pow-hard';
   if (signals.templateInjection || signals.methodOverrideAbuse || signals.headerFloodSignal) return 'pow-hard';
 
   // medium → standard PoW challenge
