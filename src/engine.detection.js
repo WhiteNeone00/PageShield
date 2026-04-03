@@ -45,6 +45,8 @@ const OPEN_REDIRECT_PARAM_KEYS = new Set([
   'redirect', 'redir', 'url', 'next', 'return', 'return_to', 'returnurl',
   'dest', 'destination', 'continue', 'callback', 'to', 'out',
 ]);
+const COMMAND_LINE_HTTP_UA_REGEX = /\b(curl|wget|httpie|aria2|powershell|python-requests|python-httpx|aiohttp|go-http-client|libwww-perl|lwp::simple|node-fetch|axios|scrapy|mechanize|restsharp|nikto|sqlmap|nmap|masscan|zgrab)\b/;
+const DATA_CRAWLER_UA_REGEX = /\b(commoncrawl|ccbot|bytespider|petalbot|semrushbot|ahrefsbot|dotbot|mj12bot|megaindex|seokicks|crawlera|zyte|brightdata|oxylabs|shodan|censys|dataforseo|diffbot)\b/;
 const LEARN_TTL_MS = 6 * 60 * 60 * 1000;
 const LEARN_MIN_HITS = 2;
 const UA_STOP_TOKENS = new Set([
@@ -227,6 +229,44 @@ function hasOpenRedirectProbe(url) {
   return false;
 }
 
+function hasProxyHeaderAnomaly(request, url) {
+  const proxyAuthorization = String(request.headers.get('proxy-authorization') || '').trim();
+  const proxyConnection = String(request.headers.get('proxy-connection') || '').trim();
+  const xForwardedHost = String(request.headers.get('x-forwarded-host') || '').trim().toLowerCase();
+  const xOriginalUrl = String(request.headers.get('x-original-url') || '').trim();
+  const xRewriteUrl = String(request.headers.get('x-rewrite-url') || '').trim();
+  const xRealIp = String(request.headers.get('x-real-ip') || '').trim().toLowerCase();
+  const cfConnectingIp = String(request.headers.get('cf-connecting-ip') || '').trim().toLowerCase();
+  const xff = String(request.headers.get('x-forwarded-for') || '').toLowerCase();
+
+  if (proxyAuthorization || proxyConnection) return true;
+
+  if (xForwardedHost) {
+    const reqHost = String(url?.hostname || '').toLowerCase();
+    if (reqHost && xForwardedHost !== reqHost && !xForwardedHost.endsWith('.' + reqHost) && !reqHost.endsWith('.' + xForwardedHost)) {
+      return true;
+    }
+  }
+
+  const rewritten = `${xOriginalUrl} ${xRewriteUrl}`.toLowerCase();
+  if (/(https?:\/\/|\/\/|\\\\|%2f%2f|%5c%5c|javascript:|data:)/i.test(rewritten)) return true;
+
+  if (xRealIp && cfConnectingIp && xRealIp !== cfConnectingIp) {
+    const xffIps = xff.split(',').map((value) => value.trim()).filter(Boolean);
+    if (!xffIps.includes(xRealIp)) return true;
+  }
+
+  return false;
+}
+
+function isCommandLineHttpClientUa(ua) {
+  return COMMAND_LINE_HTTP_UA_REGEX.test(String(ua || ''));
+}
+
+function isDataCrawlerUa(ua) {
+  return DATA_CRAWLER_UA_REGEX.test(String(ua || ''));
+}
+
 function rememberEmergingSignatures(request, signals, nowMs) {
   const ua = String(request.headers.get('user-agent') || '').toLowerCase();
   const org = String(request.cf?.asOrganization || '').toLowerCase();
@@ -245,6 +285,9 @@ function rememberEmergingSignatures(request, signals, nowMs) {
 
   if (
     Number(signals.scannerSignalScore || 0) >= 35
+    || signals.commandLineClient
+    || signals.proxyHeaderAnomaly
+    || signals.dataCrawlerUa
     || attackFlags.includes('SCANNER_UA')
     || attackFlags.includes('SCANNER_PATH')
     || attackFlags.includes('INJECTION_PROBE')
@@ -437,8 +480,19 @@ function evaluateAutomationSignals(request, headerPresenceScore, detection = {})
   const hasReferer = !!request.headers.get('referer');
   const hasUpgradeInsecure = !!request.headers.get('upgrade-insecure-requests');
   const path = new URL(request.url).pathname.toLowerCase();
+  const commandLineClient = isCommandLineHttpClientUa(ua);
+  const dataCrawlerUa = isDataCrawlerUa(ua);
 
   if (automationUaFallback(ua)) botSignalScore += 35;
+  if (commandLineClient) {
+    botSignalScore += 32;
+    scannerSignalScore += 20;
+  }
+  if (dataCrawlerUa) {
+    aiSignalScore += 22;
+    scannerSignalScore += 8;
+  }
+  if (dataCrawlerUa && !hasBrowserUa) botSignalScore += 8;
   if (hasLearnedMatch(LEARNED.botUa, ua, nowMs, 2, 4)) botSignalScore += 22;
   if (!hasBrowserUa) botSignalScore += 10;
   if (!hasSecFetchMode) botSignalScore += 8;
@@ -460,10 +514,12 @@ function evaluateAutomationSignals(request, headerPresenceScore, detection = {})
   if (/\b(gptbot|claudebot|perplexitybot|bytespider|cohere-ai|ccbot|oai-searchbot|meta-externalagent|google-extended)\b/.test(ua)) aiSignalScore += 45;
   if (customAiPatterns.some((p) => ua.includes(p))) aiSignalScore += 30;
   if ((path === '/robots.txt' || path === '/sitemap.xml') && crawlerWord) aiSignalScore += 15;
+  if ((path === '/robots.txt' || path === '/sitemap.xml') && dataCrawlerUa) aiSignalScore += 12;
+  if (commandLineClient && /\b(wp-admin|phpmyadmin|\.env|\.git|actuator|xmlrpc\.php|cgi-bin)\b/.test(path)) scannerSignalScore += 12;
 
   if (/\b(wp-admin|phpmyadmin|\.env|\.git|actuator|hudson|jenkins|server-status|xmlrpc\.php|cgi-bin|adminer\.php)\b/.test(path)) scannerSignalScore += 20;
 
-  return { botSignalScore, aiSignalScore, scannerSignalScore };
+  return { botSignalScore, aiSignalScore, scannerSignalScore, commandLineClient, dataCrawlerUa };
 }
 
 function evaluateRequestAnomalies(request, detection = {}) {
@@ -492,6 +548,8 @@ function evaluateRequestAnomalies(request, detection = {}) {
   let requestSmugglingSignal = false;
   let suspiciousCookieSignal = false;
   let headerFloodSignal = false;
+  let proxyHeaderAnomaly = false;
+  let longUrlSignal = false;
 
   const looksBrowserUa = /\b(mozilla|chrome|safari|firefox|edg|opera)\b/.test(ua);
   const looksChromeLike = /\b(chrome|edg)\b/.test(ua);
@@ -514,6 +572,25 @@ function evaluateRequestAnomalies(request, detection = {}) {
     if (xffCount >= 3) spoofScore += 5;
   }
   if (hasForwardProxyHeaders(request)) spoofScore += 4;
+  if (detection.enableProxyHeaderAnomalyDetection !== false) {
+    proxyHeaderAnomaly = hasProxyHeaderAnomaly(request, url);
+    if (proxyHeaderAnomaly) {
+      spoofScore += 9;
+      anomalyScore += 14;
+    }
+  }
+
+  if (detection.enableLongUrlDetection !== false) {
+    const pathLen = url.pathname.length;
+    const queryLen = queryRaw.length;
+    if (pathLen >= 220 || queryLen >= 1600) {
+      longUrlSignal = true;
+      anomalyScore += 14;
+    } else if (pathLen >= 160 || queryLen >= 1000) {
+      longUrlSignal = true;
+      anomalyScore += 8;
+    }
+  }
 
   const hasContentLength = request.headers.has('content-length');
   const hasTransferEncoding = !!transferEncoding;
@@ -590,6 +667,8 @@ function evaluateRequestAnomalies(request, detection = {}) {
     requestSmugglingSignal,
     suspiciousCookieSignal,
     headerFloodSignal,
+    proxyHeaderAnomaly,
+    longUrlSignal,
     headerCount,
     cookieHeaderLength: cookieHeader.length,
   };
@@ -783,13 +862,17 @@ export function classifyClientType(request, signals) {
   const hasRobotWord = hasRobotSignature(ua);
   const hasCrawlerWord = hasCrawlerSignature(ua);
   const hasBrowserWord = isKnownBrowserUa(ua);
+  const commandLineClient = !!signals.commandLineClient;
+  const dataCrawlerUa = !!signals.dataCrawlerUa;
   const botSignalScore = Number(signals.botSignalScore || 0);
   const scannerSignalScore = Number(signals.scannerSignalScore || 0);
   const spoofScore = Number(signals.spoofScore || 0);
   const attackFlags = Array.isArray(signals.attackFlags) ? signals.attackFlags : [];
 
   if (signals.ddosSuspect) return 'ddos';
+  if (commandLineClient) return 'automation-bot';
   if (signals.aiCrawler) return 'ai-crawler';
+  if (dataCrawlerUa && (signals.vpn || signals.datacenterAutomation)) return 'crawler';
   if (spoofScore >= 18) return 'automation-bot';
   if (signals.headless) return 'automation-bot';
   if (scannerSignalScore >= 35) return 'bot';
@@ -817,6 +900,8 @@ export function buildDetectionSignals(request, ip, nowMs, behaviorRisk = {}, pol
   const datacenterAutomation = isLikelyDatacenterAutomation(request, nowMs);
   const suspicious = isSuspicious(request)
     || datacenterAutomation
+    || automationSignals.commandLineClient
+    || automationSignals.dataCrawlerUa
     || (automationSignals.botSignalScore + scannerHeuristics.scannerHeuristicScore * 0.35) >= 30
     || (automationSignals.scannerSignalScore + scannerHeuristics.scannerHeuristicScore) >= 28
     || requestAnomalies.spoofScore >= 10
@@ -824,17 +909,21 @@ export function buildDetectionSignals(request, ip, nowMs, behaviorRisk = {}, pol
     || requestAnomalies.requestSmugglingSignal
     || requestAnomalies.suspiciousCookieSignal
     || requestAnomalies.headerFloodSignal
+    || requestAnomalies.proxyHeaderAnomaly
+    || requestAnomalies.longUrlSignal
     || requestAnomalies.authTargetingScore >= 12
     || scannerHeuristics.headerInjection
     || scannerHeuristics.templateInjection
     || scannerHeuristics.shellPayload
     || scannerHeuristics.prototypePollution
     || scannerHeuristics.deserializationProbe
+    || scannerHeuristics.openRedirectProbe
     || scannerHeuristics.methodOverrideAbuse;
   const headless = isHeadless(request);
   const vpn = isVpnProxy(request, nowMs, customVpnHints) || datacenterAutomation;
   const aiCrawler = isAiCrawler(request, nowMs, customAiPatterns)
     || automationSignals.aiSignalScore >= 35
+    || (automationSignals.dataCrawlerUa && datacenterAutomation)
     || (automationSignals.aiSignalScore >= 25 && scannerHeuristics.scannerPath)
     || (automationSignals.aiSignalScore >= 20 && automationSignals.scannerSignalScore >= 20)
     || requestAnomalies.anomalyScore >= 18
@@ -868,6 +957,10 @@ export function buildDetectionSignals(request, ip, nowMs, behaviorRisk = {}, pol
     botSignalScore: automationSignals.botSignalScore,
     scannerSignalScore: automationSignals.scannerSignalScore + scannerHeuristics.scannerHeuristicScore,
     spoofScore: requestAnomalies.spoofScore,
+    commandLineClient: automationSignals.commandLineClient,
+    dataCrawlerUa: automationSignals.dataCrawlerUa,
+    vpn,
+    datacenterAutomation,
     attackFlags,
   });
 
@@ -893,6 +986,8 @@ export function buildDetectionSignals(request, ip, nowMs, behaviorRisk = {}, pol
     botSignalScore: automationSignals.botSignalScore,
     aiSignalScore: automationSignals.aiSignalScore,
     scannerSignalScore: automationSignals.scannerSignalScore + scannerHeuristics.scannerHeuristicScore,
+    commandLineClient: automationSignals.commandLineClient,
+    dataCrawlerUa: automationSignals.dataCrawlerUa,
     anomalyScore: requestAnomalies.anomalyScore,
     spoofScore: requestAnomalies.spoofScore,
     scannerHeuristicScore: scannerHeuristics.scannerHeuristicScore,
@@ -906,6 +1001,8 @@ export function buildDetectionSignals(request, ip, nowMs, behaviorRisk = {}, pol
     requestSmugglingSignal: requestAnomalies.requestSmugglingSignal,
     suspiciousCookieSignal: requestAnomalies.suspiciousCookieSignal,
     headerFloodSignal: requestAnomalies.headerFloodSignal,
+    proxyHeaderAnomaly: requestAnomalies.proxyHeaderAnomaly,
+    longUrlSignal: requestAnomalies.longUrlSignal,
     headerCount: requestAnomalies.headerCount,
     cookieHeaderLength: requestAnomalies.cookieHeaderLength,
     patternScore: requestPattern.patternScore,
@@ -926,10 +1023,14 @@ export function buildDetectionSignals(request, ip, nowMs, behaviorRisk = {}, pol
     result.ddosSuspect
     || result.aiCrawler
     || result.headless
+    || result.commandLineClient
+    || result.dataCrawlerUa
     || result.scannerSignalScore >= 35
     || result.attackFlags.length >= 2
     || result.spoofScore >= 16
     || result.requestSmugglingSignal
+    || result.proxyHeaderAnomaly
+    || result.longUrlSignal
     || result.authTargetingScore >= 14
     || result.ssrfProbe
     || result.templateInjection
@@ -975,11 +1076,13 @@ export function computeThreatScore(request, signals, policy = {}) {
     tlsScore = 0, tlsSignals = [],
     fpSpam = false, fpHardBlocked = false,
     botSignalScore = 0, aiSignalScore = 0,
+    commandLineClient = false, dataCrawlerUa = false,
     scannerSignalScore = 0,
     scannerHeuristicScore = 0,
     anomalyScore = 0, spoofScore = 0,
     authTargetingScore = 0, queryEntropyScore = 0, requestSmugglingSignal = false,
     suspiciousCookieSignal = false, headerFloodSignal = false,
+    proxyHeaderAnomaly = false, longUrlSignal = false,
     headerCount = 0, cookieHeaderLength = 0,
     identicalPathBurst = false, paramEnumeration = false,
     pathSpray = false, nonGetBurst = false,
@@ -1011,6 +1114,8 @@ export function computeThreatScore(request, signals, policy = {}) {
   if (ddosSuspect) behaviorScore += 35;
   if (fpSpam) behaviorScore += 15;
   if (fpHardBlocked) behaviorScore += 20;
+  if (commandLineClient) behaviorScore += 16;
+  if (dataCrawlerUa) behaviorScore += 10;
   if (requestSmugglingSignal) behaviorScore += 12;
   if (ssrfProbe) behaviorScore += 10;
   if (templateInjection) behaviorScore += 10;
@@ -1018,6 +1123,8 @@ export function computeThreatScore(request, signals, policy = {}) {
   if (prototypePollution) behaviorScore += 10;
   if (deserializationProbe) behaviorScore += 12;
   if (openRedirectProbe) behaviorScore += 6;
+  if (proxyHeaderAnomaly) behaviorScore += 12;
+  if (longUrlSignal) behaviorScore += 8;
   if (methodOverrideAbuse) behaviorScore += 8;
   if (suspiciousCookieSignal) behaviorScore += 8;
   if (headerFloodSignal) behaviorScore += 10;
@@ -1043,6 +1150,8 @@ export function computeThreatScore(request, signals, policy = {}) {
   if (asnBurst) networkScore += 10;
   networkScore += Math.min(20, tlsScore);
   if (requestSmugglingSignal) networkScore += 8;
+  if (proxyHeaderAnomaly) networkScore += 8;
+  if (longUrlSignal) networkScore += 4;
   if (headerFloodSignal) networkScore += 6;
   if (headerCount >= 64) networkScore += 4;
   if (cookieHeaderLength >= 4096) networkScore += 6;
@@ -1151,6 +1260,7 @@ export function determineEscalation(threatScore, signals, policy = {}) {
   if (signals.isBotFarm) return 'block';
   if (signals.fpHardBlocked) return 'block';
   if (signals.requestSmugglingSignal && (signals.attackFlags || []).length > 0) return 'block';
+  if (signals.proxyHeaderAnomaly && signals.requestSmugglingSignal && (signals.attackFlags || []).length > 0) return 'block';
   if (signals.shellPayload && (signals.attackFlags || []).length > 0) return 'block';
   if (signals.deserializationProbe && (signals.attackFlags || []).length > 0) return 'block';
   if (signals.spoofScore >= 24 && signals.scannerSignalScore >= 40) return 'block';
@@ -1158,8 +1268,10 @@ export function determineEscalation(threatScore, signals, policy = {}) {
   // high → PoW challenge (hard difficulty)
   if (threatScore >= powHardThreshold) return 'pow-hard';
   if (signals.asnBurst && (signals.spam || signals.fpSpam)) return 'pow-hard';
+  if (signals.commandLineClient && signals.vpn && signals.spoofScore >= 12) return 'pow-hard';
   if (signals.authTargetingScore >= 14 && signals.spoofScore >= 12) return 'pow-hard';
   if (signals.prototypePollution && signals.spoofScore >= 14) return 'pow-hard';
+  if (signals.proxyHeaderAnomaly && signals.spoofScore >= 10) return 'pow-hard';
   if (signals.templateInjection || signals.methodOverrideAbuse || signals.headerFloodSignal) return 'pow-hard';
 
   // medium → standard PoW challenge

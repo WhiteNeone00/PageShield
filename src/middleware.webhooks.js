@@ -8,6 +8,7 @@ import { clip, severityLabel, threatBar } from './core.utils.js';
 
 // ─── Deployment Event State ──────────────────────────────────────
 let deploymentEventSent = false;
+let deploymentEventVersion = '';
 
 // ─── In-Memory Cooldown (survives KV write-limit exhaustion) ─────
 const memCooldown = new Map();
@@ -38,6 +39,10 @@ function triggerFlags(details) {
   if (details._isBotFarm) flags.push('\uD83D\uDC1C Bot Farm');
   if (details._countryAnomaly) flags.push('\uD83C\uDF0D Geo Anomaly');
   if (details._fpHardBlocked) flags.push('\u26D4 FP Hard Blocked');
+  if (details._commandLineClient) flags.push('\uD83D\uDDA5\uFE0F CLI HTTP Client');
+  if (details._dataCrawlerUa) flags.push('\uD83D\uDD77\uFE0F Data Crawler UA');
+  if (details._proxyHeaderAnomaly) flags.push('\uD83E\uDDED Proxy Header Anomaly');
+  if (details._longUrlSignal) flags.push('\uD83D\uDCCF Long URL Probe');
   if (details._attackFlags?.length) flags.push('\uD83D\uDEE1\uFE0F Attack: ' + details._attackFlags.join(', '));
   if (details._penaltyPermanent) flags.push('\u267B\uFE0F Permanent Ban');
   return flags;
@@ -267,6 +272,10 @@ export async function sendDiscordWebhook(env, eventType, reason, details) {
     details._fpSpam,
     details._fpHardBlocked,
     details._requestSmugglingSignal,
+    details._commandLineClient,
+    details._dataCrawlerUa,
+    details._proxyHeaderAnomaly,
+    details._longUrlSignal,
     details._pathSpray,
     details._nonGetBurst,
     Number(details._headerCount || 0) > 48,
@@ -303,9 +312,10 @@ export async function sendDiscordWebhook(env, eventType, reason, details) {
   const description = isDeployEvent
     ? [
         '```ansi',
-        `${A.bCyan}◆ SYSTEM UPDATE${A.reset}`,
+        `${A.bCyan}${eventType === 'DEPLOYED' ? '◆ SOURCE UPDATE' : '◆ SYSTEM UPDATE'}${A.reset}`,
         `${A.white}Release: ${A.bWhite}${clip(String(details._releaseFrom || 'initial') + ' → ' + String(details._releaseTo || 'latest'), 60)}${A.reset}`,
         `${A.white}Build:   ${A.gray}${clip(shortVersionId(details._previousDeployedVersion || 'none') + ' → ' + shortVersionId(details._deployedVersion || 'latest'), 40)}${A.reset}`,
+        `${A.white}Source:  ${A.gray}${clip(String(details._sourceRevision || 'unknown'), 40)}${A.reset}`,
         '```',
       ].join('\n')
     : '';
@@ -391,6 +401,8 @@ export async function sendDiscordWebhook(env, eventType, reason, details) {
       `${ansiPadEnd(scanItem('DDoS', details._ddosSuspect), scanPairWidth)} ${scanItem('Rate Lim', details._spam)}`,
       `${ansiPadEnd(scanItem('Bot Farm', details._isBotFarm), scanPairWidth)} ${scanItem('Attack', hasAttack)}`,
       `${ansiPadEnd(scanItem('Smuggle', details._requestSmugglingSignal), scanPairWidth)} ${scanItem('Cookie Abuse', Number(details._cookieHeaderLength || 0) > 2500)}`,
+      `${ansiPadEnd(scanItem('Cmd Client', details._commandLineClient), scanPairWidth)} ${scanItem('Data Crawler', details._dataCrawlerUa)}`,
+      `${ansiPadEnd(scanItem('Proxy Hdr', details._proxyHeaderAnomaly), scanPairWidth)} ${scanItem('Long URL', details._longUrlSignal)}`,
       `${ansiPadEnd(scanItem('ProtoPoll', details._prototypePollution), scanPairWidth)} ${scanItem('Deserialize', details._deserializationProbe)}`,
       `${ansiPadEnd(scanItem('Open Redirect', details._openRedirectProbe), scanPairWidth)} ${scanItem('Hdr Flood', Number(details._headerCount || 0) > 48)}`,
     ];
@@ -431,6 +443,8 @@ export async function sendDiscordWebhook(env, eventType, reason, details) {
       `${ansiPadEnd(scanItem('DDoS', details._ddosSuspect), scanPairWidth)} ${scanItem('Rate Lim', details._spam)}`,
       `${ansiPadEnd(scanItem('Bot Farm', details._isBotFarm), scanPairWidth)} ${scanItem('Attack', hasAttack)}`,
       `${ansiPadEnd(scanItem('Smuggle', details._requestSmugglingSignal), scanPairWidth)} ${scanItem('Cookie Abuse', Number(details._cookieHeaderLength || 0) > 2500)}`,
+      `${ansiPadEnd(scanItem('Cmd Client', details._commandLineClient), scanPairWidth)} ${scanItem('Data Crawler', details._dataCrawlerUa)}`,
+      `${ansiPadEnd(scanItem('Proxy Hdr', details._proxyHeaderAnomaly), scanPairWidth)} ${scanItem('Long URL', details._longUrlSignal)}`,
       `${ansiPadEnd(scanItem('ProtoPoll', details._prototypePollution), scanPairWidth)} ${scanItem('Deserialize', details._deserializationProbe)}`,
       `${ansiPadEnd(scanItem('Open Redirect', details._openRedirectProbe), scanPairWidth)} ${scanItem('Hdr Flood', Number(details._headerCount || 0) > 48)}`,
     ];
@@ -663,9 +677,6 @@ export async function incrementKvStat(env, key) {
 
 // ─── Deployment Event ────────────────────────────────────────────
 export async function emitDeploymentEventIfNeeded(env, details) {
-  if (deploymentEventSent) return;
-  if (!env?.SHIELD_KV) return;
-
   const meta = env?.SHIELD_VERSION_METADATA || {};
   const stableCandidates = [
     meta?.id,
@@ -680,39 +691,80 @@ export async function emitDeploymentEventIfNeeded(env, details) {
   const version = String(stableVersion || '').trim();
   if (!version) return;
 
-  const key = 'shield:meta:deployed_version';
-  const releaseKey = 'shield:meta:deployed_release';
-  const announcedVersionKey = `shield:meta:deploy_announced:${version}`;
+  if (deploymentEventSent && deploymentEventVersion === version) return;
 
-  const alreadyAnnounced = await env.SHIELD_KV.get(announcedVersionKey);
-  if (alreadyAnnounced === '1') {
-    deploymentEventSent = true;
-    return;
-  }
-
-  const prev = await env.SHIELD_KV.get(key);
-  if (prev === version) {
-    await env.SHIELD_KV.put(announcedVersionKey, '1', { expirationTtl: 90 * 24 * 3600 });
-    deploymentEventSent = true;
-    return;
-  }
+  const sourceCandidates = [
+    env?.SHIELD_SOURCE_REV,
+    env?.SOURCE_VERSION,
+    env?.GITHUB_SHA,
+    env?.CF_PAGES_COMMIT_SHA,
+    meta?.source,
+    meta?.git_sha,
+    meta?.commit,
+  ];
+  const sourceRevision = sourceCandidates.find((v) => typeof v === 'string' && v.trim().length > 0) || null;
+  const sourceLabel = sourceRevision ? shortVersionId(sourceRevision) : 'unknown';
 
   const baseRelease = String(env?.SHIELD_RELEASE_BASE || 'v4.0.0').trim();
   const bumpTypeRaw = String(env?.SHIELD_RELEASE_BUMP || 'patch').trim().toLowerCase();
   const bumpType = ['major', 'minor', 'patch'].includes(bumpTypeRaw) ? bumpTypeRaw : 'patch';
 
-  const prevMappedRelease = prev ? await env.SHIELD_KV.get(`shield:meta:release_by_worker:${prev}`) : null;
-  const latestRelease = await env.SHIELD_KV.get(releaseKey);
-  const previousRelease = prevMappedRelease || latestRelease || null;
-  const currentRelease = previousRelease
-    ? bumpRelease(previousRelease, bumpType)
-    : (parseRelease(baseRelease) ? (baseRelease.startsWith('v') ? baseRelease : `v${baseRelease}`) : 'v4.0.0');
+  let prev = null;
+  let previousRelease = null;
+  let currentRelease = parseRelease(baseRelease)
+    ? (baseRelease.startsWith('v') ? baseRelease : `v${baseRelease}`)
+    : 'v4.0.0';
 
+  const hasKv = !!env?.SHIELD_KV;
+
+  const key = 'shield:meta:deployed_version';
+  const releaseKey = 'shield:meta:deployed_release';
+  const announcedVersionKey = `shield:meta:deploy_announced:${version}`;
+
+  if (hasKv) {
+    const alreadyAnnounced = await env.SHIELD_KV.get(announcedVersionKey);
+    if (alreadyAnnounced === '1') {
+      deploymentEventSent = true;
+      deploymentEventVersion = version;
+      return;
+    }
+
+    prev = await env.SHIELD_KV.get(key);
+    if (prev === version) {
+      await env.SHIELD_KV.put(announcedVersionKey, '1', { expirationTtl: 90 * 24 * 3600 });
+      deploymentEventSent = true;
+      deploymentEventVersion = version;
+      return;
+    }
+
+    const prevMappedRelease = prev ? await env.SHIELD_KV.get(`shield:meta:release_by_worker:${prev}`) : null;
+    const latestRelease = await env.SHIELD_KV.get(releaseKey);
+    previousRelease = prevMappedRelease || latestRelease || null;
+    currentRelease = previousRelease
+      ? bumpRelease(previousRelease, bumpType)
+      : currentRelease;
+  } else if (env?.SHIELD_DB) {
+    try {
+      const marker = `[worker:${version}]`;
+      const existing = await env.SHIELD_DB.prepare(
+        "SELECT id FROM events WHERE event IN ('SYSTEM_UPDATE','DEPLOYED') AND reason LIKE ? ORDER BY id DESC LIMIT 1"
+      ).bind(`%${marker}%`).first();
+      if (existing) {
+        deploymentEventSent = true;
+        deploymentEventVersion = version;
+        return;
+      }
+    } catch {}
+  }
+
+  const workerMarker = prev
+    ? `[worker:${shortVersionId(prev)}->${shortVersionId(version)}]`
+    : `[worker:${shortVersionId(version)}]`;
   const reason = prev
-    ? `Ryzeon Shield new update deployed successfully: ${currentRelease}`
-    : `Ryzeon Shield initial deployment completed: ${currentRelease}`;
+    ? `Source updated and deployed: ${currentRelease} [source:${sourceLabel}] ${workerMarker} [worker:${version}]`
+    : `Source updated and deployed: ${currentRelease} [source:${sourceLabel}] ${workerMarker} [worker:${version}]`;
 
-  const delivered = await sendDiscordWebhook(env, 'SYSTEM_UPDATE', reason, {
+  const deployDetails = {
     ...details,
     threatScore: 0,
     _clientType: 'system',
@@ -720,13 +772,28 @@ export async function emitDeploymentEventIfNeeded(env, details) {
     _previousDeployedVersion: prev || null,
     _releaseFrom: previousRelease || 'initial',
     _releaseTo: currentRelease,
-  });
+    _sourceRevision: sourceRevision || 'unknown',
+  };
+
+  const delivered = await sendDiscordWebhook(env, 'DEPLOYED', reason, deployDetails);
 
   if (!delivered) return;
 
-  await env.SHIELD_KV.put(key, version);
-  await env.SHIELD_KV.put(releaseKey, currentRelease);
-  await env.SHIELD_KV.put(`shield:meta:release_by_worker:${version}`, currentRelease);
-  await env.SHIELD_KV.put(announcedVersionKey, '1', { expirationTtl: 90 * 24 * 3600 });
+  if (env?.SHIELD_DB) {
+    try {
+      await logToD1(env, 'DEPLOYED', reason, deployDetails);
+    } catch {}
+  }
+
+  if (hasKv) {
+    try {
+      await env.SHIELD_KV.put(key, version);
+      await env.SHIELD_KV.put(releaseKey, currentRelease);
+      await env.SHIELD_KV.put(`shield:meta:release_by_worker:${version}`, currentRelease);
+      await env.SHIELD_KV.put(announcedVersionKey, '1', { expirationTtl: 90 * 24 * 3600 });
+    } catch {}
+  }
+
   deploymentEventSent = true;
+  deploymentEventVersion = version;
 }

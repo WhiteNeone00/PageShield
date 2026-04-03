@@ -523,6 +523,7 @@ export default {
       pathSpray, nonGetBurst,
       headerCount, cookieHeaderLength,
       prototypePollution, deserializationProbe, openRedirectProbe,
+      commandLineClient, dataCrawlerUa, proxyHeaderAnomaly, longUrlSignal,
     } = signals;
     const runtimeVpnProxy = vpnProxy || runtimePolicy.extraVpnHints.some((hint) => String(asOrg || '').toLowerCase().includes(hint));
     const baseThreatScore = computeThreatScore(request, signals, runtimePolicy);
@@ -557,6 +558,10 @@ export default {
       _prototypePollution: prototypePollution,
       _deserializationProbe: deserializationProbe,
       _openRedirectProbe: openRedirectProbe,
+      _commandLineClient: commandLineClient,
+      _dataCrawlerUa: dataCrawlerUa,
+      _proxyHeaderAnomaly: proxyHeaderAnomaly,
+      _longUrlSignal: longUrlSignal,
       _headerCount: headerCount,
       _cookieHeaderLength: cookieHeaderLength,
       _pathSpray: pathSpray,
@@ -652,11 +657,24 @@ export default {
     }
 
     // ── Smart honeypot endpoints (instant permanent ban) ──
-    const instantBanHoneypots = new Set(['/admin-test', '/internal-admin', '/.git/config', '/wp-admin.php', '/.env', '/debug', '/wp-login.php', '/phpmyadmin', '/admin/config', '/.aws/credentials', '/server-status']);
+    const instantBanHoneypots = new Set([
+      '/admin-test', '/internal-admin', '/.git/config', '/wp-admin.php', '/.env', '/debug', '/wp-login.php', '/phpmyadmin', '/admin/config', '/.aws/credentials', '/server-status',
+      '/.env.local', '/.env.production', '/.env.backup', '/wp-config.php', '/.git/heads', '/.git/refs', '/.svn/entries', '/.hg/requires',
+      '/vendor/phpunit', '/vendor/phpunit/phpunit', '/_ignition/execute-solution', '/boaform/admin/formlogin', '/manager/html',
+      '/autodiscover/autodiscover.xml', '/.ssh/id_rsa', '/.ssh/authorized_keys', '/etc/passwd', '/proc/self/environ', '/phpinfo.php', '/adminer.php',
+    ]);
+    const instantBanHoneypotPrefixes = [
+      '/.git', '/.svn', '/.hg', '/.aws', '/.ssh', '/vendor/phpunit', '/actuator', '/boaform', '/manager/html', '/cgi-bin', '/autodiscover', '/wp-admin', '/wp-login',
+    ];
+    const instantBanLoosePrefixes = ['/.env', '/wp-config'];
     for (const extraPath of runtimePolicy.extraHoneypotPaths) {
       if (String(extraPath || '').startsWith('/')) instantBanHoneypots.add(String(extraPath));
     }
-    if (runtimePolicy.honeypotEnabled && instantBanHoneypots.has(pathLower)) {
+    const isInstantBanHoneypotPath = instantBanHoneypots.has(pathLower)
+      || instantBanHoneypotPrefixes.some((prefix) => pathLower === prefix || pathLower.startsWith(prefix + '/'))
+      || instantBanLoosePrefixes.some((prefix) => pathLower.startsWith(prefix));
+
+    if (runtimePolicy.honeypotEnabled && isInstantBanHoneypotPath) {
       if (!verified) {
         const penalty = await setPermanentPenalty(env, ip, 'Instant honeypot endpoint: ' + pathLower, baseDetails);
         applyPenaltyToDetails(baseDetails, penalty);
