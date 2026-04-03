@@ -10,7 +10,7 @@ version_metadata = { binding = "SHIELD_VERSION_METADATA" }
 # - Protect all on ryzeon.wtf/*
 # - Protect all on *.ryzeon.wtf/*
 routes = [
-  { pattern = "eu-api.ryzeon.wtf/*", zone_name = "ryzeon.wtf" },
+  { pattern = "eu-api.ryzeon.wtf/", zone_name = "ryzeon.wtf" },
   { pattern = "ryzeon.wtf/*", zone_name = "ryzeon.wtf" },
   { pattern = "*.ryzeon.wtf/*", zone_name = "ryzeon.wtf" },
 ]
