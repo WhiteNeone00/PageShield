@@ -8,7 +8,7 @@ import { clip, severityLabel, threatBar } from './core.utils.js';
 
 // ─── Deployment Event State ──────────────────────────────────────
 let deploymentEventSent = false;
-let deploymentEventVersion = '';
+let deploymentEventFingerprint = '';
 
 // ─── In-Memory Cooldown (survives KV write-limit exhaustion) ─────
 const memCooldown = new Map();
@@ -43,6 +43,10 @@ function triggerFlags(details) {
   if (details._dataCrawlerUa) flags.push('\uD83D\uDD77\uFE0F Data Crawler UA');
   if (details._proxyHeaderAnomaly) flags.push('\uD83E\uDDED Proxy Header Anomaly');
   if (details._longUrlSignal) flags.push('\uD83D\uDCCF Long URL Probe');
+  if (details._uaPlatformMismatchSignal) flags.push('\uD83E\uDDEE UA Platform Mismatch');
+  if (details._acceptAnomalySignal) flags.push('\uD83D\uDCE6 Accept Header Anomaly');
+  if (details._methodTunnelingSignal || details._methodTunnelProbe) flags.push('\uD83E\uDD3A Method Tunnel Probe');
+  if (details._encodingEvasionSignal || details._encodingEvasion) flags.push('\uD83C\uDFAD Encoding Evasion');
   if (details._attackFlags?.length) flags.push('\uD83D\uDEE1\uFE0F Attack: ' + details._attackFlags.join(', '));
   if (details._penaltyPermanent) flags.push('\u267B\uFE0F Permanent Ban');
   return flags;
@@ -201,11 +205,12 @@ async function getWebhookCooldownState(env, eventType, details) {
   const ip = keyPart(details?.ip || 'na', 64);
   const host = keyPart(details?.host || 'na', 64);
   const deployedVersion = keyPart(details?._deployedVersion || details?._releaseTo || 'na', 64);
+  const deployedSource = keyPart(details?._sourceRevision || 'na', 64);
 
   // ERROR/CHALLENGED/PASSED use IP-only key so cross-subdomain visits share cooldown
   const ipOnlyEvents = new Set(['error', 'challenged', 'expired', 'passed', 'failed']);
   const key = isDeployEvent
-    ? `shield:webhook:cooldown:${event}:${deployedVersion}`
+    ? `shield:webhook:cooldown:${event}:${deployedVersion}:${deployedSource}`
     : ipOnlyEvents.has(event)
       ? `shield:webhook:cooldown:${event}:${ip}`
       : `shield:webhook:cooldown:${event}:${ip}:${host}`;
@@ -238,9 +243,9 @@ export async function sendDiscordWebhook(env, eventType, reason, details) {
     return false;
   }
   const isDeployEvent = eventType === 'DEPLOYED' || eventType === 'SYSTEM_UPDATE';
-  const webhookTargets = isDeployEvent
-    ? [env?.DISCORD_WEBHOOK_URL_SYSTEM].filter(Boolean)
-    : [env?.DISCORD_WEBHOOK_URL, env?.DISCORD_WEBHOOK_URL_2].filter(Boolean);
+  const deployTargets = [env?.DISCORD_WEBHOOK_URL_SYSTEM, env?.DISCORD_WEBHOOK_URL, env?.DISCORD_WEBHOOK_URL_2].filter(Boolean);
+  const runtimeTargets = [env?.DISCORD_WEBHOOK_URL, env?.DISCORD_WEBHOOK_URL_2].filter(Boolean);
+  const webhookTargets = [...new Set(isDeployEvent ? deployTargets : runtimeTargets)];
   if (webhookTargets.length === 0) return;
   if (!DISCORD_WORTHY.has(eventType)) return;
   const cooldownState = await getWebhookCooldownState(env, eventType, details);
@@ -276,6 +281,12 @@ export async function sendDiscordWebhook(env, eventType, reason, details) {
     details._dataCrawlerUa,
     details._proxyHeaderAnomaly,
     details._longUrlSignal,
+    details._uaPlatformMismatchSignal,
+    details._acceptAnomalySignal,
+    details._methodTunnelingSignal,
+    details._encodingEvasionSignal,
+    details._methodTunnelProbe,
+    details._encodingEvasion,
     details._pathSpray,
     details._nonGetBurst,
     Number(details._headerCount || 0) > 48,
@@ -403,6 +414,7 @@ export async function sendDiscordWebhook(env, eventType, reason, details) {
       `${ansiPadEnd(scanItem('Smuggle', details._requestSmugglingSignal), scanPairWidth)} ${scanItem('Cookie Abuse', Number(details._cookieHeaderLength || 0) > 2500)}`,
       `${ansiPadEnd(scanItem('Cmd Client', details._commandLineClient), scanPairWidth)} ${scanItem('Data Crawler', details._dataCrawlerUa)}`,
       `${ansiPadEnd(scanItem('Proxy Hdr', details._proxyHeaderAnomaly), scanPairWidth)} ${scanItem('Long URL', details._longUrlSignal)}`,
+      `${ansiPadEnd(scanItem('Method Tunnel', details._methodTunnelingSignal || details._methodTunnelProbe), scanPairWidth)} ${scanItem('Encoding Evade', details._encodingEvasionSignal || details._encodingEvasion)}`,
       `${ansiPadEnd(scanItem('ProtoPoll', details._prototypePollution), scanPairWidth)} ${scanItem('Deserialize', details._deserializationProbe)}`,
       `${ansiPadEnd(scanItem('Open Redirect', details._openRedirectProbe), scanPairWidth)} ${scanItem('Hdr Flood', Number(details._headerCount || 0) > 48)}`,
     ];
@@ -445,6 +457,7 @@ export async function sendDiscordWebhook(env, eventType, reason, details) {
       `${ansiPadEnd(scanItem('Smuggle', details._requestSmugglingSignal), scanPairWidth)} ${scanItem('Cookie Abuse', Number(details._cookieHeaderLength || 0) > 2500)}`,
       `${ansiPadEnd(scanItem('Cmd Client', details._commandLineClient), scanPairWidth)} ${scanItem('Data Crawler', details._dataCrawlerUa)}`,
       `${ansiPadEnd(scanItem('Proxy Hdr', details._proxyHeaderAnomaly), scanPairWidth)} ${scanItem('Long URL', details._longUrlSignal)}`,
+      `${ansiPadEnd(scanItem('Method Tunnel', details._methodTunnelingSignal || details._methodTunnelProbe), scanPairWidth)} ${scanItem('Encoding Evade', details._encodingEvasionSignal || details._encodingEvasion)}`,
       `${ansiPadEnd(scanItem('ProtoPoll', details._prototypePollution), scanPairWidth)} ${scanItem('Deserialize', details._deserializationProbe)}`,
       `${ansiPadEnd(scanItem('Open Redirect', details._openRedirectProbe), scanPairWidth)} ${scanItem('Hdr Flood', Number(details._headerCount || 0) > 48)}`,
     ];
@@ -691,8 +704,6 @@ export async function emitDeploymentEventIfNeeded(env, details) {
   const version = String(stableVersion || '').trim();
   if (!version) return;
 
-  if (deploymentEventSent && deploymentEventVersion === version) return;
-
   const sourceCandidates = [
     env?.SHIELD_SOURCE_REV,
     env?.SOURCE_VERSION,
@@ -704,6 +715,10 @@ export async function emitDeploymentEventIfNeeded(env, details) {
   ];
   const sourceRevision = sourceCandidates.find((v) => typeof v === 'string' && v.trim().length > 0) || null;
   const sourceLabel = sourceRevision ? shortVersionId(sourceRevision) : 'unknown';
+  const sourceKeyPart = keyPart(sourceLabel, 32);
+  const deployFingerprint = `${version}:${sourceKeyPart}`;
+
+  if (deploymentEventSent && deploymentEventFingerprint === deployFingerprint) return;
 
   const baseRelease = String(env?.SHIELD_RELEASE_BASE || 'v4.0.0').trim();
   const bumpTypeRaw = String(env?.SHIELD_RELEASE_BUMP || 'patch').trim().toLowerCase();
@@ -718,22 +733,25 @@ export async function emitDeploymentEventIfNeeded(env, details) {
   const hasKv = !!env?.SHIELD_KV;
 
   const key = 'shield:meta:deployed_version';
+  const sourceKey = 'shield:meta:deployed_source_rev';
   const releaseKey = 'shield:meta:deployed_release';
-  const announcedVersionKey = `shield:meta:deploy_announced:${version}`;
+  const announcedVersionKey = `shield:meta:deploy_announced:${version}:${sourceKeyPart}`;
+  let prevSource = null;
 
   if (hasKv) {
     const alreadyAnnounced = await env.SHIELD_KV.get(announcedVersionKey);
     if (alreadyAnnounced === '1') {
       deploymentEventSent = true;
-      deploymentEventVersion = version;
+      deploymentEventFingerprint = deployFingerprint;
       return;
     }
 
     prev = await env.SHIELD_KV.get(key);
-    if (prev === version) {
+    prevSource = await env.SHIELD_KV.get(sourceKey);
+    if (prev === version && prevSource === sourceLabel) {
       await env.SHIELD_KV.put(announcedVersionKey, '1', { expirationTtl: 90 * 24 * 3600 });
       deploymentEventSent = true;
-      deploymentEventVersion = version;
+      deploymentEventFingerprint = deployFingerprint;
       return;
     }
 
@@ -745,13 +763,13 @@ export async function emitDeploymentEventIfNeeded(env, details) {
       : currentRelease;
   } else if (env?.SHIELD_DB) {
     try {
-      const marker = `[worker:${version}]`;
+      const marker = `[worker:${version}][source:${sourceLabel}]`;
       const existing = await env.SHIELD_DB.prepare(
         "SELECT id FROM events WHERE event IN ('SYSTEM_UPDATE','DEPLOYED') AND reason LIKE ? ORDER BY id DESC LIMIT 1"
       ).bind(`%${marker}%`).first();
       if (existing) {
         deploymentEventSent = true;
-        deploymentEventVersion = version;
+        deploymentEventFingerprint = deployFingerprint;
         return;
       }
     } catch {}
@@ -760,9 +778,7 @@ export async function emitDeploymentEventIfNeeded(env, details) {
   const workerMarker = prev
     ? `[worker:${shortVersionId(prev)}->${shortVersionId(version)}]`
     : `[worker:${shortVersionId(version)}]`;
-  const reason = prev
-    ? `Source updated and deployed: ${currentRelease} [source:${sourceLabel}] ${workerMarker} [worker:${version}]`
-    : `Source updated and deployed: ${currentRelease} [source:${sourceLabel}] ${workerMarker} [worker:${version}]`;
+  const reason = `PageShield SRC GOT UPDATED AND NOW IT'S LIVE | Release ${currentRelease} | Source ${sourceLabel} ${workerMarker} [worker:${version}][source:${sourceLabel}]`;
 
   const deployDetails = {
     ...details,
@@ -788,6 +804,7 @@ export async function emitDeploymentEventIfNeeded(env, details) {
   if (hasKv) {
     try {
       await env.SHIELD_KV.put(key, version);
+      await env.SHIELD_KV.put(sourceKey, sourceLabel);
       await env.SHIELD_KV.put(releaseKey, currentRelease);
       await env.SHIELD_KV.put(`shield:meta:release_by_worker:${version}`, currentRelease);
       await env.SHIELD_KV.put(announcedVersionKey, '1', { expirationTtl: 90 * 24 * 3600 });
@@ -795,5 +812,5 @@ export async function emitDeploymentEventIfNeeded(env, details) {
   }
 
   deploymentEventSent = true;
-  deploymentEventVersion = version;
+  deploymentEventFingerprint = deployFingerprint;
 }

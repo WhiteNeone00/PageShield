@@ -524,6 +524,8 @@ export default {
       headerCount, cookieHeaderLength,
       prototypePollution, deserializationProbe, openRedirectProbe,
       commandLineClient, dataCrawlerUa, proxyHeaderAnomaly, longUrlSignal,
+      uaPlatformMismatchSignal, acceptAnomalySignal, methodTunnelingSignal, encodingEvasionSignal,
+      methodTunnelProbe, encodingEvasion,
     } = signals;
     const runtimeVpnProxy = vpnProxy || runtimePolicy.extraVpnHints.some((hint) => String(asOrg || '').toLowerCase().includes(hint));
     const baseThreatScore = computeThreatScore(request, signals, runtimePolicy);
@@ -562,6 +564,12 @@ export default {
       _dataCrawlerUa: dataCrawlerUa,
       _proxyHeaderAnomaly: proxyHeaderAnomaly,
       _longUrlSignal: longUrlSignal,
+      _uaPlatformMismatchSignal: uaPlatformMismatchSignal,
+      _acceptAnomalySignal: acceptAnomalySignal,
+      _methodTunnelingSignal: methodTunnelingSignal,
+      _encodingEvasionSignal: encodingEvasionSignal,
+      _methodTunnelProbe: methodTunnelProbe,
+      _encodingEvasion: encodingEvasion,
       _headerCount: headerCount,
       _cookieHeaderLength: cookieHeaderLength,
       _pathSpray: pathSpray,

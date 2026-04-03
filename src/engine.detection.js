@@ -47,6 +47,8 @@ const OPEN_REDIRECT_PARAM_KEYS = new Set([
 ]);
 const COMMAND_LINE_HTTP_UA_REGEX = /\b(curl|wget|httpie|aria2|powershell|python-requests|python-httpx|aiohttp|go-http-client|libwww-perl|lwp::simple|node-fetch|axios|scrapy|mechanize|restsharp|nikto|sqlmap|nmap|masscan|zgrab)\b/;
 const DATA_CRAWLER_UA_REGEX = /\b(commoncrawl|ccbot|bytespider|petalbot|semrushbot|ahrefsbot|dotbot|mj12bot|megaindex|seokicks|crawlera|zyte|brightdata|oxylabs|shodan|censys|dataforseo|diffbot)\b/;
+const METHOD_TUNNEL_PARAM_REGEX = /(?:^|[?&])(?:_method|method|http_method|x-http-method-override)=(put|patch|delete|trace|connect|track)/i;
+const UNICODE_ENCODING_REGEX = /%u[0-9a-f]{4}/i;
 const LEARN_TTL_MS = 6 * 60 * 60 * 1000;
 const LEARN_MIN_HITS = 2;
 const UA_STOP_TOKENS = new Set([
@@ -267,6 +269,65 @@ function isDataCrawlerUa(ua) {
   return DATA_CRAWLER_UA_REGEX.test(String(ua || ''));
 }
 
+function hasMethodTunnelProbe(request, decodedQuery) {
+  const query = String(decodedQuery || '').toLowerCase();
+  if (!query) return false;
+  const match = query.match(METHOD_TUNNEL_PARAM_REGEX);
+  if (!match) return false;
+
+  const requestedMethod = String(request.method || 'GET').toUpperCase();
+  const overrideMethod = String(match[1] || '').toUpperCase();
+  if (!overrideMethod) return false;
+
+  if (['TRACE', 'TRACK', 'CONNECT'].includes(overrideMethod)) return true;
+  if ((requestedMethod === 'GET' || requestedMethod === 'HEAD' || requestedMethod === 'OPTIONS') && overrideMethod !== requestedMethod) return true;
+  if (requestedMethod !== 'POST' && requestedMethod !== overrideMethod) return true;
+  return false;
+}
+
+function hasUaPlatformMismatch(request, ua) {
+  const uaLower = String(ua || '').toLowerCase();
+  const secPlatform = String(request.headers.get('sec-ch-ua-platform') || '').replace(/"/g, '').trim().toLowerCase();
+  if (!secPlatform || secPlatform === 'unknown') return false;
+
+  const uaIsAndroid = uaLower.includes('android');
+  const uaIsIos = uaLower.includes('iphone') || uaLower.includes('ipad') || uaLower.includes('ios');
+  const uaIsWindows = uaLower.includes('windows nt');
+  const uaIsMac = uaLower.includes('macintosh') || uaLower.includes('mac os x');
+  const uaIsLinuxDesktop = uaLower.includes('linux') && !uaIsAndroid;
+
+  if (secPlatform.includes('windows') && (uaIsAndroid || uaIsIos || uaIsMac)) return true;
+  if (secPlatform.includes('android') && (uaIsWindows || uaIsMac || uaIsIos || uaIsLinuxDesktop)) return true;
+  if ((secPlatform.includes('ios') || secPlatform.includes('iphone') || secPlatform.includes('ipad')) && !uaIsIos) return true;
+  if (secPlatform.includes('mac') && (uaIsWindows || uaIsAndroid || uaIsIos)) return true;
+  if (secPlatform.includes('linux') && (uaIsWindows || uaIsIos)) return true;
+
+  return false;
+}
+
+function hasAcceptAnomaly(request, looksBrowserUa) {
+  if (!looksBrowserUa) return false;
+  const method = String(request.method || 'GET').toUpperCase();
+  if (method !== 'GET') return false;
+
+  const accept = String(request.headers.get('accept') || '').toLowerCase();
+  const secFetchDest = String(request.headers.get('sec-fetch-dest') || '').toLowerCase();
+  const secFetchMode = String(request.headers.get('sec-fetch-mode') || '').toLowerCase();
+  const isNavigation = secFetchDest === 'document' || secFetchMode === 'navigate';
+  if (!isNavigation) return false;
+  if (!accept) return true;
+  return !accept.includes('text/html');
+}
+
+function hasEncodingEvasion(rawPath, encodedTokenCount = 0) {
+  const value = String(rawPath || '').toLowerCase();
+  const pct25Count = (value.match(/%25/gi) || []).length;
+  if (UNICODE_ENCODING_REGEX.test(value)) return true;
+  if (pct25Count >= 6) return true;
+  if (Number(encodedTokenCount || 0) >= 28) return true;
+  return false;
+}
+
 function rememberEmergingSignatures(request, signals, nowMs) {
   const ua = String(request.headers.get('user-agent') || '').toLowerCase();
   const org = String(request.cf?.asOrganization || '').toLowerCase();
@@ -288,6 +349,8 @@ function rememberEmergingSignatures(request, signals, nowMs) {
     || signals.commandLineClient
     || signals.proxyHeaderAnomaly
     || signals.dataCrawlerUa
+    || signals.methodTunnelingSignal
+    || signals.encodingEvasionSignal
     || attackFlags.includes('SCANNER_UA')
     || attackFlags.includes('SCANNER_PATH')
     || attackFlags.includes('INJECTION_PROBE')
@@ -301,6 +364,8 @@ function rememberEmergingSignatures(request, signals, nowMs) {
     || attackFlags.includes('PROTOTYPE_POLLUTION')
     || attackFlags.includes('OPEN_REDIRECT_PROBE')
     || attackFlags.includes('DESERIALIZATION_PROBE')
+    || attackFlags.includes('METHOD_TUNNEL')
+    || attackFlags.includes('ENCODING_EVASION')
     || attackFlags.includes('METHOD_OVERRIDE_ABUSE')
     || attackFlags.includes('COOKIE_ABUSE')
     || attackFlags.includes('HEADER_FLOOD')
@@ -426,8 +491,10 @@ function evaluateScannerHeuristics(request, detection = {}) {
   const prototypePollution = PROTOTYPE_POLLUTION_REGEX.test(mergedPayload);
   const deserializationProbe = DESERIALIZATION_REGEX.test(mergedPayload);
   const openRedirectProbe = hasOpenRedirectProbe(url);
+  const methodTunnelProbe = hasMethodTunnelProbe(request, decodedQuery);
   const methodOverrideAbuse = enableMethodOverrideDetection && hasMethodOverrideAbuse(request);
   const encodedTokenCount = (rawPath.match(/%[0-9a-f]{2}/gi) || []).length;
+  const encodingEvasion = hasEncodingEvasion(rawPath, encodedTokenCount);
   const queryCount = Array.from(url.searchParams.keys()).length;
 
   let score = 0;
@@ -442,6 +509,8 @@ function evaluateScannerHeuristics(request, detection = {}) {
   if (prototypePollution) score += 24;
   if (deserializationProbe) score += 30;
   if (openRedirectProbe) score += 14;
+  if (methodTunnelProbe) score += 16;
+  if (encodingEvasion) score += 18;
   if (methodOverrideAbuse) score += 14;
   if (encodedTokenCount >= 14) score += 8;
   if (queryCount >= 18) score += 12;
@@ -459,6 +528,8 @@ function evaluateScannerHeuristics(request, detection = {}) {
     prototypePollution,
     deserializationProbe,
     openRedirectProbe,
+    methodTunnelProbe,
+    encodingEvasion,
     methodOverrideAbuse,
   };
 }
@@ -540,6 +611,7 @@ function evaluateRequestAnomalies(request, detection = {}) {
   const url = new URL(request.url);
   const path = url.pathname.toLowerCase();
   const queryRaw = url.search.startsWith('?') ? url.search.slice(1) : url.search;
+  const decodedQueryLower = safeDecode(url.search).toLowerCase();
 
   let anomalyScore = 0;
   let spoofScore = 0;
@@ -550,6 +622,10 @@ function evaluateRequestAnomalies(request, detection = {}) {
   let headerFloodSignal = false;
   let proxyHeaderAnomaly = false;
   let longUrlSignal = false;
+  let uaPlatformMismatchSignal = false;
+  let acceptAnomalySignal = false;
+  let methodTunnelingSignal = false;
+  let encodingEvasionSignal = false;
 
   const looksBrowserUa = /\b(mozilla|chrome|safari|firefox|edg|opera)\b/.test(ua);
   const looksChromeLike = /\b(chrome|edg)\b/.test(ua);
@@ -560,6 +636,20 @@ function evaluateRequestAnomalies(request, detection = {}) {
 
   // accept: */* is normal for fetch/XHR — only penalise on navigations (GET without sec-fetch-dest: document)
   const secFetchDest = String(request.headers.get('sec-fetch-dest') || '').toLowerCase();
+  if (detection.enableAcceptAnomalyDetection !== false) {
+    acceptAnomalySignal = hasAcceptAnomaly(request, looksBrowserUa);
+    if (acceptAnomalySignal) {
+      spoofScore += 8;
+      anomalyScore += 10;
+    }
+  }
+  if (detection.enableUaPlatformMismatchDetection !== false) {
+    uaPlatformMismatchSignal = hasUaPlatformMismatch(request, ua);
+    if (uaPlatformMismatchSignal) {
+      spoofScore += 10;
+      anomalyScore += 8;
+    }
+  }
   if (looksBrowserUa && accept === '*/*' && method === 'GET' && secFetchDest === 'document') spoofScore += 6;
   if (looksBrowserUa && !secFetchMode) spoofScore += 7;
   if (looksBrowserUa && !secFetchSite) spoofScore += 5;
@@ -589,6 +679,23 @@ function evaluateRequestAnomalies(request, detection = {}) {
     } else if (pathLen >= 160 || queryLen >= 1000) {
       longUrlSignal = true;
       anomalyScore += 8;
+    }
+  }
+
+  if (detection.enableMethodTunnelingDetection !== false) {
+    methodTunnelingSignal = hasMethodTunnelProbe(request, decodedQueryLower);
+    if (methodTunnelingSignal) {
+      spoofScore += 6;
+      anomalyScore += 12;
+    }
+  }
+
+  if (detection.enableEncodingEvasionDetection !== false) {
+    const rawPath = url.pathname + url.search;
+    const encodedTokenCount = (rawPath.match(/%[0-9a-f]{2}/gi) || []).length;
+    encodingEvasionSignal = hasEncodingEvasion(rawPath, encodedTokenCount);
+    if (encodingEvasionSignal) {
+      anomalyScore += 12;
     }
   }
 
@@ -669,6 +776,10 @@ function evaluateRequestAnomalies(request, detection = {}) {
     headerFloodSignal,
     proxyHeaderAnomaly,
     longUrlSignal,
+    uaPlatformMismatchSignal,
+    acceptAnomalySignal,
+    methodTunnelingSignal,
+    encodingEvasionSignal,
     headerCount,
     cookieHeaderLength: cookieHeader.length,
   };
@@ -765,6 +876,9 @@ export function detectAttackPatterns(request, detection = {}) {
   const prototypePollution = PROTOTYPE_POLLUTION_REGEX.test(mergedPayload);
   const deserializationProbe = DESERIALIZATION_REGEX.test(mergedPayload);
   const openRedirectProbe = hasOpenRedirectProbe(url);
+  const methodTunnelProbe = hasMethodTunnelProbe(request, decodedQuery);
+  const encodedTokenCount = (rawPath.match(/%[0-9a-f]{2}/gi) || []).length;
+  const encodingEvasion = hasEncodingEvasion(rawPath, encodedTokenCount);
   const cookieHeaderMaxLength = Math.max(128, Number(detection.cookieHeaderMaxLength || 2500));
   const headerCountMax = Math.max(8, Number(detection.headerCountMax || 48));
 
@@ -828,6 +942,12 @@ export function detectAttackPatterns(request, detection = {}) {
   if (deserializationProbe) {
     flags.push('DESERIALIZATION_PROBE');
   }
+  if (methodTunnelProbe) {
+    flags.push('METHOD_TUNNEL');
+  }
+  if (encodingEvasion) {
+    flags.push('ENCODING_EVASION');
+  }
   if (detection.enableMethodOverrideDetection !== false && hasMethodOverrideAbuse(request)) {
     flags.push('METHOD_OVERRIDE_ABUSE');
   }
@@ -873,6 +993,7 @@ export function classifyClientType(request, signals) {
   if (commandLineClient) return 'automation-bot';
   if (signals.aiCrawler) return 'ai-crawler';
   if (dataCrawlerUa && (signals.vpn || signals.datacenterAutomation)) return 'crawler';
+  if (signals.methodTunnelingSignal || signals.proxyHeaderAnomaly) return 'automation-bot';
   if (spoofScore >= 18) return 'automation-bot';
   if (signals.headless) return 'automation-bot';
   if (scannerSignalScore >= 35) return 'bot';
@@ -911,6 +1032,10 @@ export function buildDetectionSignals(request, ip, nowMs, behaviorRisk = {}, pol
     || requestAnomalies.headerFloodSignal
     || requestAnomalies.proxyHeaderAnomaly
     || requestAnomalies.longUrlSignal
+    || requestAnomalies.uaPlatformMismatchSignal
+    || requestAnomalies.acceptAnomalySignal
+    || requestAnomalies.methodTunnelingSignal
+    || requestAnomalies.encodingEvasionSignal
     || requestAnomalies.authTargetingScore >= 12
     || scannerHeuristics.headerInjection
     || scannerHeuristics.templateInjection
@@ -918,6 +1043,8 @@ export function buildDetectionSignals(request, ip, nowMs, behaviorRisk = {}, pol
     || scannerHeuristics.prototypePollution
     || scannerHeuristics.deserializationProbe
     || scannerHeuristics.openRedirectProbe
+    || scannerHeuristics.methodTunnelProbe
+    || scannerHeuristics.encodingEvasion
     || scannerHeuristics.methodOverrideAbuse;
   const headless = isHeadless(request);
   const vpn = isVpnProxy(request, nowMs, customVpnHints) || datacenterAutomation;
@@ -959,6 +1086,8 @@ export function buildDetectionSignals(request, ip, nowMs, behaviorRisk = {}, pol
     spoofScore: requestAnomalies.spoofScore,
     commandLineClient: automationSignals.commandLineClient,
     dataCrawlerUa: automationSignals.dataCrawlerUa,
+    methodTunnelingSignal: requestAnomalies.methodTunnelingSignal,
+    proxyHeaderAnomaly: requestAnomalies.proxyHeaderAnomaly,
     vpn,
     datacenterAutomation,
     attackFlags,
@@ -1003,6 +1132,10 @@ export function buildDetectionSignals(request, ip, nowMs, behaviorRisk = {}, pol
     headerFloodSignal: requestAnomalies.headerFloodSignal,
     proxyHeaderAnomaly: requestAnomalies.proxyHeaderAnomaly,
     longUrlSignal: requestAnomalies.longUrlSignal,
+    uaPlatformMismatchSignal: requestAnomalies.uaPlatformMismatchSignal,
+    acceptAnomalySignal: requestAnomalies.acceptAnomalySignal,
+    methodTunnelingSignal: requestAnomalies.methodTunnelingSignal,
+    encodingEvasionSignal: requestAnomalies.encodingEvasionSignal,
     headerCount: requestAnomalies.headerCount,
     cookieHeaderLength: requestAnomalies.cookieHeaderLength,
     patternScore: requestPattern.patternScore,
@@ -1015,6 +1148,8 @@ export function buildDetectionSignals(request, ip, nowMs, behaviorRisk = {}, pol
     prototypePollution: scannerHeuristics.prototypePollution,
     deserializationProbe: scannerHeuristics.deserializationProbe,
     openRedirectProbe: scannerHeuristics.openRedirectProbe,
+    methodTunnelProbe: scannerHeuristics.methodTunnelProbe,
+    encodingEvasion: scannerHeuristics.encodingEvasion,
     methodOverrideAbuse: scannerHeuristics.methodOverrideAbuse,
   };
 
@@ -1031,6 +1166,10 @@ export function buildDetectionSignals(request, ip, nowMs, behaviorRisk = {}, pol
     || result.requestSmugglingSignal
     || result.proxyHeaderAnomaly
     || result.longUrlSignal
+    || result.uaPlatformMismatchSignal
+    || result.acceptAnomalySignal
+    || result.methodTunnelingSignal
+    || result.encodingEvasionSignal
     || result.authTargetingScore >= 14
     || result.ssrfProbe
     || result.templateInjection
@@ -1038,6 +1177,8 @@ export function buildDetectionSignals(request, ip, nowMs, behaviorRisk = {}, pol
     || result.prototypePollution
     || result.deserializationProbe
     || result.openRedirectProbe
+    || result.methodTunnelProbe
+    || result.encodingEvasion
     || result.methodOverrideAbuse
     || result.suspiciousCookieSignal
     || result.headerFloodSignal
@@ -1083,12 +1224,15 @@ export function computeThreatScore(request, signals, policy = {}) {
     authTargetingScore = 0, queryEntropyScore = 0, requestSmugglingSignal = false,
     suspiciousCookieSignal = false, headerFloodSignal = false,
     proxyHeaderAnomaly = false, longUrlSignal = false,
+    uaPlatformMismatchSignal = false, acceptAnomalySignal = false,
+    methodTunnelingSignal = false, encodingEvasionSignal = false,
     headerCount = 0, cookieHeaderLength = 0,
     identicalPathBurst = false, paramEnumeration = false,
     pathSpray = false, nonGetBurst = false,
     ssrfProbe = false, graphqlIntrospection = false, headerInjection = false,
     templateInjection = false, shellPayload = false,
     prototypePollution = false, deserializationProbe = false, openRedirectProbe = false,
+    methodTunnelProbe = false, encodingEvasion = false,
     methodOverrideAbuse = false,
   } = signals || {};
 
@@ -1125,6 +1269,12 @@ export function computeThreatScore(request, signals, policy = {}) {
   if (openRedirectProbe) behaviorScore += 6;
   if (proxyHeaderAnomaly) behaviorScore += 12;
   if (longUrlSignal) behaviorScore += 8;
+  if (uaPlatformMismatchSignal) behaviorScore += 10;
+  if (acceptAnomalySignal) behaviorScore += 8;
+  if (methodTunnelingSignal) behaviorScore += 10;
+  if (encodingEvasionSignal) behaviorScore += 10;
+  if (methodTunnelProbe) behaviorScore += 8;
+  if (encodingEvasion) behaviorScore += 8;
   if (methodOverrideAbuse) behaviorScore += 8;
   if (suspiciousCookieSignal) behaviorScore += 8;
   if (headerFloodSignal) behaviorScore += 10;
@@ -1152,6 +1302,8 @@ export function computeThreatScore(request, signals, policy = {}) {
   if (requestSmugglingSignal) networkScore += 8;
   if (proxyHeaderAnomaly) networkScore += 8;
   if (longUrlSignal) networkScore += 4;
+  if (methodTunnelingSignal) networkScore += 6;
+  if (encodingEvasionSignal) networkScore += 4;
   if (headerFloodSignal) networkScore += 6;
   if (headerCount >= 64) networkScore += 4;
   if (cookieHeaderLength >= 4096) networkScore += 6;
@@ -1201,6 +1353,8 @@ export function computeThreatScore(request, signals, policy = {}) {
   if (attackFlags.includes('PROTOTYPE_POLLUTION')) attackScore += 22;
   if (attackFlags.includes('OPEN_REDIRECT_PROBE')) attackScore += 12;
   if (attackFlags.includes('DESERIALIZATION_PROBE')) attackScore += 30;
+  if (attackFlags.includes('METHOD_TUNNEL')) attackScore += 18;
+  if (attackFlags.includes('ENCODING_EVASION')) attackScore += 16;
   if (attackFlags.includes('METHOD_OVERRIDE_ABUSE')) attackScore += 18;
   if (attackFlags.includes('COOKIE_ABUSE')) attackScore += 16;
   if (attackFlags.includes('HEADER_FLOOD')) attackScore += 14;
@@ -1211,6 +1365,8 @@ export function computeThreatScore(request, signals, policy = {}) {
   if (prototypePollution) attackScore += 6;
   if (deserializationProbe) attackScore += 8;
   if (openRedirectProbe) attackScore += 4;
+  if (methodTunnelProbe) attackScore += 6;
+  if (encodingEvasion) attackScore += 6;
 
   // ── Pattern Score ──
   patternScore += (signals.patternScore || 0);
@@ -1261,6 +1417,7 @@ export function determineEscalation(threatScore, signals, policy = {}) {
   if (signals.fpHardBlocked) return 'block';
   if (signals.requestSmugglingSignal && (signals.attackFlags || []).length > 0) return 'block';
   if (signals.proxyHeaderAnomaly && signals.requestSmugglingSignal && (signals.attackFlags || []).length > 0) return 'block';
+  if (signals.methodTunnelingSignal && signals.requestSmugglingSignal && (signals.attackFlags || []).length > 0) return 'block';
   if (signals.shellPayload && (signals.attackFlags || []).length > 0) return 'block';
   if (signals.deserializationProbe && (signals.attackFlags || []).length > 0) return 'block';
   if (signals.spoofScore >= 24 && signals.scannerSignalScore >= 40) return 'block';
@@ -1272,6 +1429,8 @@ export function determineEscalation(threatScore, signals, policy = {}) {
   if (signals.authTargetingScore >= 14 && signals.spoofScore >= 12) return 'pow-hard';
   if (signals.prototypePollution && signals.spoofScore >= 14) return 'pow-hard';
   if (signals.proxyHeaderAnomaly && signals.spoofScore >= 10) return 'pow-hard';
+  if (signals.methodTunnelingSignal && signals.spoofScore >= 10) return 'pow-hard';
+  if (signals.encodingEvasionSignal && signals.spoofScore >= 10) return 'pow-hard';
   if (signals.templateInjection || signals.methodOverrideAbuse || signals.headerFloodSignal) return 'pow-hard';
 
   // medium → standard PoW challenge
