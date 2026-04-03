@@ -109,6 +109,11 @@ function threatLevel(score) {
   return 'low';
 }
 
+function isOriginDownStatus(statusCode) {
+  const status = Number(statusCode || 0);
+  return status === 404 || status >= 500;
+}
+
 async function sendDiscordWebhookDelayed(env, eventType, reason, details, ms = 3000) {
   await delay(ms);
   return sendDiscordWebhook(env, eventType, reason, details);
@@ -448,11 +453,28 @@ export default {
     const recheckUntil = Number(cookies[COOKIE_RECHECK_NAME] || 0);
     const nowSec = Math.floor(nowMs / 1000);
     const isExpired = cookieExp > 0 && nowSec > cookieExp;
+    const hasAnyShieldCookie = !!(
+      cookies[COOKIE_NAME]
+      || cookies[COOKIE_EXP_NAME]
+      || cookies[COOKIE_SIG_NAME]
+      || cookies[COOKIE_FP_NAME]
+      || cookies[COOKIE_RECHECK_NAME]
+    );
     let verified = false;
+    let hasInvalidShieldSession = false;
+    if (verifiedFlag && (!cookieSig || !cookieFp || isExpired)) {
+      hasInvalidShieldSession = true;
+    }
     if (verifiedFlag && !isExpired && cookieSig && cookieFp) {
       const secret = getSigningSecret(env);
       const tokenData = ip + ':' + cookieExp + ':' + cookieFp;
       verified = await hmacVerify(secret, tokenData, cookieSig);
+      if (!verified) {
+        hasInvalidShieldSession = true;
+      }
+    }
+    if (!verifiedFlag && hasAnyShieldCookie) {
+      hasInvalidShieldSession = true;
     }
     const cookieFpValidated = normalizeFpHash(cookies[COOKIE_FP_NAME]);
     const fpHash = cookieFpValidated || await deriveRequestFingerprint(request, ip);
@@ -552,11 +574,11 @@ export default {
 
       try {
         const response = await fetch(originReq);
-        if (response.status >= 500) {
+        if (isOriginDownStatus(response.status)) {
           const alreadyKnown = isOriginKnownDown(host);
           markOriginDown(host);
           // Always log to D1, only webhook on first detection
-          const tasks = [logErrorToD1(env, 'Origin responded with ' + response.status, `${contextLabel}_upstream_5xx`, baseDetails)];
+          const tasks = [logErrorToD1(env, 'Origin responded with ' + response.status, `${contextLabel}_upstream_down`, baseDetails)];
           if (!alreadyKnown) {
             tasks.push(sendDiscordWebhook(env, 'ERROR', 'Origin returned ' + response.status + ' (maintenance fallback)', baseDetails));
           }
@@ -1370,10 +1392,10 @@ export default {
             probe = await fetch(probeReq2);
           }
 
-          if (probe.status >= 500) {
+          if (isOriginDownStatus(probe.status)) {
             const alreadyKnown = isOriginKnownDown(host);
             markOriginDown(host);
-            const tasks = [logErrorToD1(env, 'Origin responded with ' + probe.status, 'pre_challenge_upstream_5xx', baseDetails)];
+            const tasks = [logErrorToD1(env, 'Origin responded with ' + probe.status, 'pre_challenge_upstream_down', baseDetails)];
             if (!alreadyKnown) {
               tasks.push(sendDiscordWebhook(env, 'ERROR', 'Origin returned ' + probe.status + ' — origin down', baseDetails));
             }
@@ -1400,7 +1422,9 @@ export default {
 
       // Determine specific reason and serve appropriate page
       let eventType = 'CHALLENGED';
-      let reason = verified ? 'Risk recheck required' : 'Challenge gate (first visit)';
+      let reason = verified
+        ? 'Risk recheck required'
+        : (hasInvalidShieldSession ? 'Challenge gate (session reset)' : 'Challenge gate (first visit)');
       let blockPage = null;
 
       if (isExpired) {
@@ -1474,6 +1498,9 @@ export default {
       // Otherwise serve the challenge page
       const challengeBody = htmlChallenge(host, rayId, colo, utcTime, threatScore);
       const challengeHeaders = securityHeaders(new Headers({ 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' }));
+      if (hasInvalidShieldSession) {
+        clearShieldCookies(challengeHeaders);
+      }
       challengeHeaders.append('set-cookie', COOKIE_RISK_NAME + '=' + String(threatScore) + '; Path=/; Max-Age=120; HttpOnly; Secure; SameSite=Lax');
       return new Response(challengeBody, { status: 403, headers: challengeHeaders });
     }
