@@ -412,6 +412,7 @@ export default {
         _blacklistSource: earlyBlacklist.source,
       };
       ctx.waitUntil(Promise.all([
+        sendDiscordWebhook(env, 'HARD_BLOCKED', 'Silent re-block (' + earlyBlacklist.source + ')', silentDetails),
         logToD1(env, 'HARD_BLOCKED', 'Silent re-block (' + earlyBlacklist.source + ')', silentDetails),
         incrementKvStat(env, 'blocked'),
         incrementKvStat(env, 'total'),
@@ -1310,6 +1311,7 @@ export default {
       baseDetails._riskLevel = 'critical';
       baseDetails.threatScore = Math.max(95, Number(baseDetails.threatScore || 0));
       ctx.waitUntil(Promise.all([
+        sendDiscordWebhook(env, 'HARD_BLOCKED', 'IP Blacklisted (' + blacklistStatus.source + ')', baseDetails),
         logToD1(env, 'HARD_BLOCKED', 'IP Blacklisted (' + blacklistStatus.source + ')', baseDetails),
         incrementKvStat(env, 'blocked'),
         incrementKvStat(env, 'total'),
@@ -1341,6 +1343,28 @@ export default {
       applyPenaltyToDetails(baseDetails, penalty);
       emitBlockLogs(ctx, env, 'AI_CRAWLER', 'AI crawler blocked: ' + ua.slice(0, 80), baseDetails, signals, fpHash, ip, asn);
       return new Response(htmlAiCrawlerBlocked(host, rayId), {
+        status: 403,
+        headers: securityHeaders(new Headers({ 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })),
+      });
+    }
+
+    // ── Command-line / automation client hard block ──
+    const automationClientBlocked = commandLineClient
+      || methodTunnelingSignal
+      || encodingEvasionSignal
+      || (dataCrawlerUa && (proxyHeaderAnomaly || threatScore >= 45));
+    if (runtimePolicy.attackBlockEnabled && automationClientBlocked && !isWhitelistedIp(ip) && !isShieldChallengeApi) {
+      const reason = commandLineClient
+        ? 'CLI automation blocked: ' + ua.slice(0, 80)
+        : methodTunnelingSignal
+          ? 'Method tunneling automation blocked'
+          : encodingEvasionSignal
+            ? 'Encoding-evasion automation blocked'
+            : 'Data crawler automation blocked';
+      const penalty = await escalateIpPenalty(env, ip, reason, baseDetails);
+      applyPenaltyToDetails(baseDetails, penalty);
+      emitBlockLogs(ctx, env, 'BOT_DETECTED', reason, baseDetails, signals, fpHash, ip, asn);
+      return new Response(htmlBotDetected(host, rayId), {
         status: 403,
         headers: securityHeaders(new Headers({ 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })),
       });
