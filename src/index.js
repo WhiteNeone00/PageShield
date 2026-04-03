@@ -9,7 +9,7 @@ import {
   COOKIE_NAME, COOKIE_EXP_NAME, COOKIE_SIG_NAME,
   COOKIE_FP_NAME, COOKIE_RISK_NAME, COOKIE_MAX_AGE,
   POW_DIFFICULTY, CHALLENGE_NONCE_TTL, DEFAULT_POLICY,
-  POLICY_KEY,
+  POLICY_KEY, normalizeShieldPolicy,
 } from './core.config.js';
 import { getClientIp, parseCookies, securityHeaders, clip, penaltyLabel, sha256 } from './core.utils.js';
 import { kvGetJson, kvPutJson } from './core.storage.js';
@@ -42,7 +42,12 @@ import {
   handleBlacklistView, handleBlacklistUpdate, handleListUpdate, handleListView,
   handleUnblacklist, handleWhitelistExtraView, handleWhitelistExtraUpdate,
 } from './middleware.api.js';
-import { handleAdminRoutes, resolveDashboardSession } from './admin.routes.js';
+import {
+  handleAdminRoutes,
+  resolveDashboardSession,
+  getInMemoryWhitelistExtraIps,
+  getInMemoryPolicySnapshot,
+} from './admin.routes.js';
 import { lookupSite, buildOriginRequest } from './engine.sites.js';
 
 const FP_HASH_RE = /^[a-f0-9]{64}$/;
@@ -52,6 +57,7 @@ const CHALLENGE_MIN_TTL = 30;
 const CHALLENGE_MAX_TTL = 120;
 const COOKIE_RECHECK_NAME = 'cf_shield_recheck';
 const VERIFIED_RECHECK_COOLDOWN = 300;
+const KV_DISABLED_VALUES = new Set(['1', 'true', 'yes', 'on']);
 
 const SENSITIVE_AUTH_PATHS = new Set([
   '/login', '/signin', '/auth', '/auth/login', '/api/token', '/oauth/token',
@@ -61,6 +67,15 @@ const SENSITIVE_AUTH_PATHS = new Set([
 // ─── Origin Health Cache (suppress repeated ERROR webhooks) ─────
 const originDownCache = new Map();
 const ORIGIN_DOWN_SUPPRESS_MS = 10 * 60 * 1000; // 10 min
+
+function isKvDisabled(env) {
+  const raw = String(env?.DISABLE_KV || env?.SHIELD_KV_DISABLED || '').trim().toLowerCase();
+  return KV_DISABLED_VALUES.has(raw);
+}
+
+function canUseKv(env) {
+  return !!env?.SHIELD_KV && !isKvDisabled(env);
+}
 
 function isOriginKnownDown(host) {
   const exp = originDownCache.get(host);
@@ -126,7 +141,7 @@ function makeSessionKey(ip, fpHash) {
 }
 
 async function trackAttackMemory(env, ip, eventType, reason) {
-  if (!env?.SHIELD_KV || !ip || ip === 'N/A') return null;
+  if (!canUseKv(env) || !ip || ip === 'N/A') return null;
   const key = `shield:attacks:ip:${ip}`;
   const prev = (await kvGetJson(env, key)) || {
     count: 0,
@@ -178,7 +193,7 @@ function isSensitiveAuthPath(pathLower) {
 }
 
 async function kvIncrementTtl(env, key, ttlSeconds) {
-  if (!env?.SHIELD_KV) return 0;
+  if (!canUseKv(env)) return 0;
   try {
     const safeTtl = Math.max(60, Number(ttlSeconds || 0));
     const current = Number((await env.SHIELD_KV.get(key)) || '0');
@@ -190,10 +205,13 @@ async function kvIncrementTtl(env, key, ttlSeconds) {
   }
 }
 
-async function checkTokenBucketBurst(env, ip, fpHash, nowMs) {
-  if (!env?.SHIELD_KV || !ip || ip === 'N/A') {
+async function checkTokenBucketBurst(env, ip, fpHash, nowMs, policy = DEFAULT_POLICY) {
+  if (!canUseKv(env) || !ip || ip === 'N/A') {
     return { blocked: false, ipPerSec: 0, fpPerSec: 0 };
   }
+  const detection = policy?.detection || {};
+  const maxIpPerSec = Math.max(1, Number(detection.tokenBucketIpPerSec || 35));
+  const maxFpPerSec = Math.max(1, Number(detection.tokenBucketFpPerSec || 45));
   const secondBucket = Math.floor(nowMs / 1000);
   const ipKey = `shield:tb:ip:${ip}:${secondBucket}`;
   const fpKey = fpHash ? `shield:tb:fp:${fpHash}:${secondBucket}` : null;
@@ -203,25 +221,32 @@ async function checkTokenBucketBurst(env, ip, fpHash, nowMs) {
     fpKey ? kvIncrementTtl(env, fpKey, 8) : Promise.resolve(0),
   ]);
 
-  const blocked = ipPerSec > 35 || fpPerSec > 45;
+  const blocked = ipPerSec > maxIpPerSec || fpPerSec > maxFpPerSec;
   return { blocked, ipPerSec, fpPerSec };
 }
 
-async function trackAuthPressure(env, ip, fpHash, pathLower) {
-  if (!env?.SHIELD_KV || !isSensitiveAuthPath(pathLower)) {
+async function trackAuthPressure(env, ip, fpHash, pathLower, policy = DEFAULT_POLICY) {
+  if (!canUseKv(env) || !isSensitiveAuthPath(pathLower)) {
     return { active: false, hard: false, warn: false, ipCount: 0, fpCount: 0 };
   }
-  const windowSlot = Math.floor(Date.now() / (5 * 60 * 1000));
+  const detection = policy?.detection || {};
+  const authWindowSeconds = Math.max(60, Number(detection.authWindowSeconds || 5 * 60));
+  const authWindowMs = authWindowSeconds * 1000;
+  const warnIpThreshold = Math.max(1, Number(detection.authWarnIpCount || 8));
+  const warnFpThreshold = Math.max(1, Number(detection.authWarnFpCount || 10));
+  const hardIpThreshold = Math.max(1, Number(detection.authHardIpCount || 20));
+  const hardFpThreshold = Math.max(1, Number(detection.authHardFpCount || 25));
+  const windowSlot = Math.floor(Date.now() / authWindowMs);
   const ipKey = `shield:auth:ip:${ip}:${pathLower}:${windowSlot}`;
   const fpKey = fpHash ? `shield:auth:fp:${fpHash}:${pathLower}:${windowSlot}` : null;
 
   const [ipCount, fpCount] = await Promise.all([
-    kvIncrementTtl(env, ipKey, 20 * 60),
-    fpKey ? kvIncrementTtl(env, fpKey, 20 * 60) : Promise.resolve(0),
+    kvIncrementTtl(env, ipKey, Math.ceil(authWindowSeconds * 4)),
+    fpKey ? kvIncrementTtl(env, fpKey, Math.ceil(authWindowSeconds * 4)) : Promise.resolve(0),
   ]);
 
-  const hard = ipCount >= 20 || fpCount >= 25;
-  const warn = ipCount >= 8 || fpCount >= 10;
+  const hard = ipCount >= hardIpThreshold || fpCount >= hardFpThreshold;
+  const warn = ipCount >= warnIpThreshold || fpCount >= warnFpThreshold;
   return { active: true, hard, warn, ipCount, fpCount };
 }
 
@@ -230,13 +255,13 @@ function powFailKey(ip, fpHash) {
 }
 
 async function getPowFailStreak(env, ip, fpHash) {
-  if (!env?.SHIELD_KV || !ip || ip === 'N/A') return 0;
+  if (!canUseKv(env) || !ip || ip === 'N/A') return 0;
   const data = await kvGetJson(env, powFailKey(ip, fpHash));
   return Number(data?.count || 0);
 }
 
 async function increasePowFailStreak(env, ip, fpHash) {
-  if (!env?.SHIELD_KV || !ip || ip === 'N/A') return 0;
+  if (!canUseKv(env) || !ip || ip === 'N/A') return 0;
   const key = powFailKey(ip, fpHash);
   const prev = (await kvGetJson(env, key)) || { count: 0, updatedAt: 0 };
   const next = { count: Number(prev.count || 0) + 1, updatedAt: Date.now() };
@@ -245,28 +270,19 @@ async function increasePowFailStreak(env, ip, fpHash) {
 }
 
 async function clearPowFailStreak(env, ip, fpHash) {
-  if (!env?.SHIELD_KV || !ip || ip === 'N/A') return;
-  await env.SHIELD_KV.delete(powFailKey(ip, fpHash));
+  if (!canUseKv(env) || !ip || ip === 'N/A') return;
+  try {
+    await env.SHIELD_KV.delete(powFailKey(ip, fpHash));
+  } catch {}
 }
 
 async function loadRuntimePolicy(env) {
-  if (!env?.SHIELD_KV) return { ...DEFAULT_POLICY };
+  if (!canUseKv(env)) return getInMemoryPolicySnapshot();
   try {
     const raw = await env.SHIELD_KV.get(POLICY_KEY, 'json');
-    const data = raw && typeof raw === 'object' ? raw : {};
-    return {
-      protectEnabled: data.protectEnabled !== false,
-      rateLimitEnabled: data.rateLimitEnabled !== false,
-      attackBlockEnabled: data.attackBlockEnabled !== false,
-      honeypotEnabled: data.honeypotEnabled !== false,
-      aiCrawlerBlockEnabled: data.aiCrawlerBlockEnabled !== false,
-      ddosBlockEnabled: data.ddosBlockEnabled !== false,
-      vpnBlockEnabled: data.vpnBlockEnabled !== false,
-      extraHoneypotPaths: Array.isArray(data.extraHoneypotPaths) ? data.extraHoneypotPaths.map((x) => String(x || '').toLowerCase().trim()).filter(Boolean) : [],
-      extraVpnHints: Array.isArray(data.extraVpnHints) ? data.extraVpnHints.map((x) => String(x || '').toLowerCase().trim()).filter(Boolean) : [],
-    };
+    return normalizeShieldPolicy(raw || {});
   } catch {
-    return { ...DEFAULT_POLICY };
+    return normalizeShieldPolicy(DEFAULT_POLICY);
   }
 }
 
@@ -302,6 +318,10 @@ function applyPenaltyToDetails(baseDetails, penalty) {
 export default {
   async fetch(request, env, ctx) {
    try {
+    if (!canUseKv(env)) {
+      env = { ...env, SHIELD_KV: undefined };
+    }
+
     // Load remote lists (cached in memory + KV)
     await loadRemoteLists(env);
     await loadDynamicIpBlacklist(env);
@@ -316,9 +336,10 @@ export default {
     const ua = request.headers.get('user-agent') || 'N/A';
     const method = request.method || 'N/A';
     const pathLower = url.pathname.toLowerCase();
+    const isShieldChallengeApi = pathLower === '/__challenge' || pathLower === '/__verify';
 
     let runtimeWhitelistExtra = '';
-    if (env?.SHIELD_KV) {
+    if (canUseKv(env)) {
       try {
         const runtimeIps = await env.SHIELD_KV.get('shield:whitelist:extra', 'json');
         const parsed = Array.isArray(runtimeIps) ? runtimeIps : [];
@@ -327,6 +348,8 @@ export default {
           .filter(Boolean)
           .join(',');
       } catch {}
+    } else {
+      runtimeWhitelistExtra = getInMemoryWhitelistExtraIps().join(',');
     }
     const mergedWhitelistEnv = {
       ...env,
@@ -436,8 +459,10 @@ export default {
     const behaviorRisk = await loadBehaviorRisk(env, fpHash, asn, country);
     behaviorRisk._fpHash = fpHash;
     const ipReputation = await loadIpReputation(env, ip);
+    const repAutoBlockScore = Math.max(20, Number(runtimePolicy?.detection?.ipReputationAutoBlockScore || 80));
+    const repShouldAutoBlock = Number(ipReputation.score || 0) >= repAutoBlockScore || ipReputation.autoBlock;
 
-    if (runtimePolicy.attackBlockEnabled && ipReputation.autoBlock && !isWhitelistedIp(ip)) {
+    if (runtimePolicy.attackBlockEnabled && repShouldAutoBlock && !isWhitelistedIp(ip)) {
       const repAutoBlockDetails = {
         ip, ua, method, referer, acceptLanguage,
         host, path: url.pathname + url.search,
@@ -452,6 +477,7 @@ export default {
         _ipRepEvents: ipReputation.events,
         _ipRepLastEvent: ipReputation.lastEvent,
         _autoBlockSource: 'ip_reputation',
+        _ipRepAutoBlockScore: repAutoBlockScore,
         _attackFlags: ['IP_REPUTATION_AUTOBLOCK'],
       };
       const penalty = await escalateIpPenalty(env, ip, 'IP reputation auto-block threshold reached', repAutoBlockDetails);
@@ -464,7 +490,7 @@ export default {
     }
 
     const trustedAsnOrg = isTrustedAsnOrg(asOrg, env);
-    const signals = buildDetectionSignals(request, ip, nowMs, behaviorRisk);
+    const signals = buildDetectionSignals(request, ip, nowMs, behaviorRisk, runtimePolicy);
     const {
       suspicious, headless, vpn: vpnProxy, aiCrawler,
       spam, hardBlocked, attackFlags, ddosSuspect,
@@ -475,14 +501,15 @@ export default {
       pathSpray, nonGetBurst,
     } = signals;
     const runtimeVpnProxy = vpnProxy || runtimePolicy.extraVpnHints.some((hint) => String(asOrg || '').toLowerCase().includes(hint));
-    const baseThreatScore = computeThreatScore(request, signals);
+    const baseThreatScore = computeThreatScore(request, signals, runtimePolicy);
     const ipRepInfluence = clamp(Number(ipReputation.score || 0), 0, 100);
+    const ipRepWeight = Math.max(0, Math.min(1, Number(runtimePolicy?.detection?.ipReputationWeight || 0.25)));
     const threatScore = clamp(
-      Math.max(baseThreatScore, Math.round(baseThreatScore * 0.75 + ipRepInfluence * 0.25)),
+      Math.max(baseThreatScore, Math.round(baseThreatScore * (1 - ipRepWeight) + ipRepInfluence * ipRepWeight)),
       0,
       100
     );
-    const escalationAction = determineEscalation(threatScore, signals);
+    const escalationAction = determineEscalation(threatScore, signals, runtimePolicy);
 
     const baseDetails = {
       ip, ua, method, referer, acceptLanguage,
@@ -507,6 +534,7 @@ export default {
       _nonGetBurst: nonGetBurst,
       _baseThreatScore: baseThreatScore,
       _ipRepInfluence: ipRepInfluence,
+      _ipRepWeight: ipRepWeight,
       _trustedAsnOrg: trustedAsnOrg,
       _escalation: escalationAction,
       _fpHardBlocked: fpHardBlocked,
@@ -554,11 +582,11 @@ export default {
       }
     };
 
-    const tokenBucket = await checkTokenBucketBurst(env, ip, fpHash, nowMs);
+    const tokenBucket = await checkTokenBucketBurst(env, ip, fpHash, nowMs, runtimePolicy);
     baseDetails._ipPerSec = tokenBucket.ipPerSec;
     baseDetails._fpPerSec = tokenBucket.fpPerSec;
 
-    if (runtimePolicy.rateLimitEnabled && tokenBucket.blocked && !isWhitelistedIp(ip)) {
+    if (runtimePolicy.rateLimitEnabled && tokenBucket.blocked && !isWhitelistedIp(ip) && !isShieldChallengeApi) {
       const penalty = await escalateIpPenalty(env, ip, 'Token-bucket burst threshold exceeded', baseDetails);
       applyPenaltyToDetails(baseDetails, penalty);
       emitBlockLogs(ctx, env, 'RATE_LIMITED', 'Token-bucket burst threshold exceeded', baseDetails, signals, fpHash, ip, asn);
@@ -568,8 +596,10 @@ export default {
       });
     }
 
-    const attackMemory = env?.SHIELD_KV ? await kvGetJson(env, `shield:attacks:ip:${ip}`) : null;
-    if (attackMemory && Number(attackMemory.count || 0) >= 25 && (Date.now() - Number(attackMemory.last || 0)) < 24 * 3600 * 1000) {
+    const attackMemory = canUseKv(env) ? await kvGetJson(env, `shield:attacks:ip:${ip}`) : null;
+    const attackMemoryLimit = Math.max(1, Number(runtimePolicy?.detection?.attackMemoryAutoBlockCount || 25));
+    const attackMemoryWindowMs = Math.max(5 * 60 * 1000, Number(runtimePolicy?.detection?.attackMemoryWindowSeconds || 24 * 3600) * 1000);
+    if (attackMemory && Number(attackMemory.count || 0) >= attackMemoryLimit && (Date.now() - Number(attackMemory.last || 0)) < attackMemoryWindowMs) {
       const penalty = await setPermanentPenalty(env, ip, 'Persistent offender auto-block from attack memory', baseDetails);
       applyPenaltyToDetails(baseDetails, penalty);
       emitBlockLogs(ctx, env, 'HARD_BLOCKED', 'Abusive Blocked', baseDetails, signals, fpHash, ip, asn);
@@ -647,7 +677,7 @@ export default {
       return new Response(challengeBody, { status: 403, headers: challengeHeaders });
     }
 
-    const authPressure = await trackAuthPressure(env, ip, fpHash, pathLower);
+    const authPressure = await trackAuthPressure(env, ip, fpHash, pathLower, runtimePolicy);
     if (authPressure.active) {
       baseDetails._authPressureIp = authPressure.ipCount;
       baseDetails._authPressureFp = authPressure.fpCount;
@@ -770,7 +800,7 @@ export default {
       const sigPayload = `${challengeId}:${prefixHash}:${ip}:${issuedAt}:${ttlSeconds}:${challengeFp || 'nofp'}`;
       const challengeSig = await hmacSign(secret, sigPayload);
 
-      if (env?.SHIELD_KV) {
+      if (canUseKv(env)) {
         await kvPutJson(env, `shield:challenge:${challengeId}`, {
           challengeId, ip,
           difficulty: adjustedDifficulty,
@@ -908,64 +938,90 @@ export default {
         let powHashOk = false;
         let powDifficultyOk = false;
 
-        if (env?.SHIELD_KV && challengeId) {
-          const stored = await kvGetJson(env, `shield:challenge:${challengeId}`);
-          const storedIssuedAt = Number(stored?.issuedAt || 0);
-          const storedTtl = clamp(Number(stored?.ttlSeconds || CHALLENGE_NONCE_TTL), CHALLENGE_MIN_TTL, CHALLENGE_MAX_TTL);
-          const fresh = stored
-            && Number.isFinite(storedIssuedAt)
-            && storedIssuedAt > 0
-            && (Date.now() - storedIssuedAt) <= (storedTtl * 1000);
-          const prefixHash = await sha256(prefix);
-          const expectedSigData = `${challengeId}:${prefixHash}:${ip}:${storedIssuedAt}:${storedTtl}:${stored?.fpHash || 'nofp'}`;
+        const prefixHash = await sha256(prefix);
+        const verifySignedFallback = async () => {
+          const fallbackIssuedAt = Number(challengeIssuedAt || 0);
+          const fallbackTtl = clamp(Number(challengeExpiresIn || CHALLENGE_NONCE_TTL), CHALLENGE_MIN_TTL, CHALLENGE_MAX_TTL);
+          const fallbackFresh = Number.isFinite(fallbackIssuedAt)
+            && fallbackIssuedAt > 0
+            && (Date.now() - fallbackIssuedAt) <= (fallbackTtl * 1000);
           const providedSig = String(challengeSig || '').trim();
-          const signatureOk = stored?.challengeSig
-            ? !!providedSig
-              && String(stored.challengeSig) === providedSig
-              && await hmacVerify(getSigningSecret(env), expectedSigData, providedSig)
-            : true;
-          challengeFpMismatch = !!stored?.fpHash && stored.fpHash !== verifyFpHash;
-          if (fresh && stored.ip === ip && stored.prefixHash === prefixHash && stored.challengeId === challengeId && signatureOk && !challengeFpMismatch) {
-            requiredDifficulty = Number(stored.difficulty || requiredDifficulty);
-            requiredType = String(stored.challengeType || requiredType);
-            challengeValidated = true;
-            await env.SHIELD_KV.delete(`shield:challenge:${challengeId}`);
-          } else {
-            const fallbackIssuedAt = Number(challengeIssuedAt || 0);
-            const fallbackTtl = clamp(Number(challengeExpiresIn || CHALLENGE_NONCE_TTL), CHALLENGE_MIN_TTL, CHALLENGE_MAX_TTL);
-            const fallbackFresh = Number.isFinite(fallbackIssuedAt)
-              && fallbackIssuedAt > 0
-              && (Date.now() - fallbackIssuedAt) <= (fallbackTtl * 1000);
-            const fallbackSigDataWithFp = `${challengeId}:${prefixHash}:${ip}:${fallbackIssuedAt}:${fallbackTtl}:${verifyFpHash || 'nofp'}`;
-            const fallbackSigDataNoFp = `${challengeId}:${prefixHash}:${ip}:${fallbackIssuedAt}:${fallbackTtl}:nofp`;
-            const providedSig = String(challengeSig || '').trim();
-            const fallbackSigOk = !!providedSig && fallbackFresh && (
-              await hmacVerify(getSigningSecret(env), fallbackSigDataWithFp, providedSig)
-              || await hmacVerify(getSigningSecret(env), fallbackSigDataNoFp, providedSig)
-            );
+          const fallbackSigDataWithFp = `${challengeId}:${prefixHash}:${ip}:${fallbackIssuedAt}:${fallbackTtl}:${verifyFpHash || 'nofp'}`;
+          const fallbackSigDataNoFp = `${challengeId}:${prefixHash}:${ip}:${fallbackIssuedAt}:${fallbackTtl}:nofp`;
+          const fallbackSigOk = !!providedSig && fallbackFresh && (
+            await hmacVerify(getSigningSecret(env), fallbackSigDataWithFp, providedSig)
+            || await hmacVerify(getSigningSecret(env), fallbackSigDataNoFp, providedSig)
+          );
+          return { fallbackSigOk, fallbackTtl, providedSig };
+        };
 
-            let fallbackReplayUsed = false;
-            if (fallbackSigOk && env?.SHIELD_KV) {
-              const replayKey = `shield:challenge:usedsig:${providedSig}`;
-              fallbackReplayUsed = !!(await env.SHIELD_KV.get(replayKey));
-              if (!fallbackReplayUsed) {
+        if (challengeId) {
+          if (canUseKv(env)) {
+            const stored = await kvGetJson(env, `shield:challenge:${challengeId}`);
+            const storedIssuedAt = Number(stored?.issuedAt || 0);
+            const storedTtl = clamp(Number(stored?.ttlSeconds || CHALLENGE_NONCE_TTL), CHALLENGE_MIN_TTL, CHALLENGE_MAX_TTL);
+            const fresh = stored
+              && Number.isFinite(storedIssuedAt)
+              && storedIssuedAt > 0
+              && (Date.now() - storedIssuedAt) <= (storedTtl * 1000);
+            const expectedSigData = `${challengeId}:${prefixHash}:${ip}:${storedIssuedAt}:${storedTtl}:${stored?.fpHash || 'nofp'}`;
+            const providedSig = String(challengeSig || '').trim();
+            const signatureOk = stored?.challengeSig
+              ? !!providedSig
+                && String(stored.challengeSig) === providedSig
+                && await hmacVerify(getSigningSecret(env), expectedSigData, providedSig)
+              : true;
+            challengeFpMismatch = !!stored?.fpHash && stored.fpHash !== verifyFpHash;
+            if (fresh && stored.ip === ip && stored.prefixHash === prefixHash && stored.challengeId === challengeId && signatureOk && !challengeFpMismatch) {
+              requiredDifficulty = Number(stored.difficulty || requiredDifficulty);
+              requiredType = String(stored.challengeType || requiredType);
+              challengeValidated = true;
+              try {
+                await env.SHIELD_KV.delete(`shield:challenge:${challengeId}`);
+              } catch {}
+            } else {
+              const { fallbackSigOk, fallbackTtl, providedSig: fallbackProvidedSig } = await verifySignedFallback();
+              let fallbackReplayUsed = false;
+              if (fallbackSigOk) {
+                const replayKey = `shield:challenge:usedsig:${fallbackProvidedSig}`;
                 try {
-                  await env.SHIELD_KV.put(replayKey, '1', { expirationTtl: fallbackTtl });
-                } catch { /* KV write limit — proceed with HMAC-only validation */ }
+                  fallbackReplayUsed = !!(await env.SHIELD_KV.get(replayKey));
+                } catch {
+                  fallbackReplayUsed = false;
+                }
+                if (!fallbackReplayUsed) {
+                  try {
+                    await env.SHIELD_KV.put(replayKey, '1', { expirationTtl: fallbackTtl });
+                  } catch { /* KV write limit — proceed with HMAC-only validation */ }
+                }
+              }
+
+              if (fallbackSigOk && !fallbackReplayUsed) {
+                requiredDifficulty = clamp(Number(challengeDifficulty || POW_DIFFICULTY), 2, 7);
+                requiredType = String(challengeType || 'pow');
+                challengeValidated = true;
+              } else {
+                challengeReplaySuspect = true;
+                if (stored) {
+                  try {
+                    await env.SHIELD_KV.delete(`shield:challenge:${challengeId}`);
+                  } catch {}
+                }
+                requiredDifficulty = 99;
               }
             }
-
-            if (fallbackSigOk && !fallbackReplayUsed) {
+          } else {
+            const { fallbackSigOk } = await verifySignedFallback();
+            if (fallbackSigOk) {
               requiredDifficulty = clamp(Number(challengeDifficulty || POW_DIFFICULTY), 2, 7);
               requiredType = String(challengeType || 'pow');
               challengeValidated = true;
             } else {
               challengeReplaySuspect = true;
-              if (stored) await env.SHIELD_KV.delete(`shield:challenge:${challengeId}`);
               requiredDifficulty = 99;
             }
           }
-        } else if (env?.SHIELD_KV) {
+        } else {
           challengeReplaySuspect = true;
           requiredDifficulty = 99;
         }
@@ -989,7 +1045,7 @@ export default {
         const clientSnapshot = normalizeClientSnapshot(client);
         const uaHash = await sha256((ua || '').slice(0, 512));
         let sessionDrift = false;
-        if (env?.SHIELD_KV && verifyFpHash) {
+        if (canUseKv(env) && verifyFpHash) {
           const sessKey = makeSessionKey(ip, verifyFpHash);
           const prevSession = await kvGetJson(env, sessKey);
           if (prevSession) {

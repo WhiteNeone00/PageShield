@@ -1262,6 +1262,10 @@ export function htmlShieldStats(host, initialStats = null) {
 
     function settingsTab(policy) {
       const p = policy || {};
+      const d = p.detection && typeof p.detection === 'object' ? p.detection : {};
+      const listToText = function (value) {
+        return Array.isArray(value) ? value.map(function (x) { return String(x || '').trim(); }).filter(Boolean).join('\n') : '';
+      };
       const rows = [
         ['protectEnabled', 'Global protection', 'Master gate for all challenge and detection flows.', !!p.protectEnabled],
         ['rateLimitEnabled', 'Rate limiting', 'Apply request window controls before escalation.', !!p.rateLimitEnabled],
@@ -1281,6 +1285,50 @@ export function htmlShieldStats(host, initialStats = null) {
           return '<label class="switch"><div><div class="name">' + row[1] + '</div><div class="desc">' + row[2] + '</div></div><input class="policy-toggle" data-key="' + row[0] + '" type="checkbox" ' + (row[3] ? 'checked' : '') + '></label>';
         }).join('')
         + '</div>'
+        + '</article>'
+        + '<article class="panel" style="margin-top:10px">'
+        + '<div class="panel-head"><div><h2 class="panel-title">Advanced detection config</h2><p class="panel-sub">Control thresholds, escalation levels, and custom signatures from panel/API.</p></div></div>'
+        + '<div class="mini-grid">'
+        + '<div class="mini"><div class="k">Token bucket IP/sec</div><input id="det_tokenBucketIpPerSec" class="field" type="number" min="1" value="' + Number(d.tokenBucketIpPerSec || 35) + '"></div>'
+        + '<div class="mini"><div class="k">Token bucket FP/sec</div><input id="det_tokenBucketFpPerSec" class="field" type="number" min="1" value="' + Number(d.tokenBucketFpPerSec || 45) + '"></div>'
+        + '<div class="mini"><div class="k">Auth window seconds</div><input id="det_authWindowSeconds" class="field" type="number" min="60" value="' + Number(d.authWindowSeconds || 300) + '"></div>'
+        + '<div class="mini"><div class="k">Auth hard IP count</div><input id="det_authHardIpCount" class="field" type="number" min="1" value="' + Number(d.authHardIpCount || 20) + '"></div>'
+        + '<div class="mini"><div class="k">Auth hard FP count</div><input id="det_authHardFpCount" class="field" type="number" min="1" value="' + Number(d.authHardFpCount || 25) + '"></div>'
+        + '<div class="mini"><div class="k">Attack memory autoblock count</div><input id="det_attackMemoryAutoBlockCount" class="field" type="number" min="1" value="' + Number(d.attackMemoryAutoBlockCount || 25) + '"></div>'
+        + '<div class="mini"><div class="k">IP reputation autoblock score</div><input id="det_ipReputationAutoBlockScore" class="field" type="number" min="1" value="' + Number(d.ipReputationAutoBlockScore || 80) + '"></div>'
+        + '<div class="mini"><div class="k">IP reputation weight</div><input id="det_ipReputationWeight" class="field" type="number" min="0" max="1" step="0.01" value="' + Number(d.ipReputationWeight || 0.25) + '"></div>'
+        + '<div class="mini"><div class="k">Block threshold</div><input id="det_scoreBlockThreshold" class="field" type="number" min="1" max="100" value="' + Number(d.scoreBlockThreshold || 85) + '"></div>'
+        + '<div class="mini"><div class="k">Pow-hard threshold</div><input id="det_scorePowHardThreshold" class="field" type="number" min="1" max="100" value="' + Number(d.scorePowHardThreshold || 60) + '"></div>'
+        + '<div class="mini"><div class="k">Pow threshold</div><input id="det_scorePowThreshold" class="field" type="number" min="1" max="100" value="' + Number(d.scorePowThreshold || 30) + '"></div>'
+        + '<div class="mini"><div class="k">Pow-lite threshold</div><input id="det_scorePowLiteThreshold" class="field" type="number" min="0" max="100" value="' + Number(d.scorePowLiteThreshold || 15) + '"></div>'
+        + '</div>'
+        + '<div class="mini-grid" style="margin-top:10px">'
+        + '<div class="mini"><div class="k">Bot signal weight</div><input id="det_botSignalWeight" class="field" type="number" min="0" max="2" step="0.01" value="' + Number(d.botSignalWeight || 0.45) + '"></div>'
+        + '<div class="mini"><div class="k">AI signal weight</div><input id="det_aiSignalWeight" class="field" type="number" min="0" max="2" step="0.01" value="' + Number(d.aiSignalWeight || 0.5) + '"></div>'
+        + '<div class="mini"><div class="k">Scanner signal weight</div><input id="det_scannerSignalWeight" class="field" type="number" min="0" max="2" step="0.01" value="' + Number(d.scannerSignalWeight || 0.55) + '"></div>'
+        + '<div class="mini"><div class="k">Anomaly signal weight</div><input id="det_anomalySignalWeight" class="field" type="number" min="0" max="2" step="0.01" value="' + Number(d.anomalySignalWeight || 0.45) + '"></div>'
+        + '<div class="mini"><div class="k">Spoof signal weight</div><input id="det_spoofSignalWeight" class="field" type="number" min="0" max="2" step="0.01" value="' + Number(d.spoofSignalWeight || 0.55) + '"></div>'
+        + '<div class="mini"><div class="k">Attack memory window seconds</div><input id="det_attackMemoryWindowSeconds" class="field" type="number" min="60" value="' + Number(d.attackMemoryWindowSeconds || 86400) + '"></div>'
+        + '</div>'
+        + '<div class="switch-list" style="margin-top:10px">'
+        + '<label class="switch"><div><div class="name">SSRF detection</div><div class="desc">Detect internal metadata/localhost callback probes.</div></div><input id="det_enableSsrfDetection" type="checkbox" ' + (d.enableSsrfDetection !== false ? 'checked' : '') + '></label>'
+        + '<label class="switch"><div><div class="name">GraphQL introspection detection</div><div class="desc">Flag schema and type introspection probing.</div></div><input id="det_enableGraphqlIntrospectionDetection" type="checkbox" ' + (d.enableGraphqlIntrospectionDetection !== false ? 'checked' : '') + '></label>'
+        + '<label class="switch"><div><div class="name">Header injection detection</div><div class="desc">Detect CRLF and header-splitting attempts.</div></div><input id="det_enableHeaderInjectionDetection" type="checkbox" ' + (d.enableHeaderInjectionDetection !== false ? 'checked' : '') + '></label>'
+        + '<label class="switch"><div><div class="name">JWT alg=none detection</div><div class="desc">Flag insecure JWT none-alg usage attempts.</div></div><input id="det_enableJwtNoneDetection" type="checkbox" ' + (d.enableJwtNoneDetection !== false ? 'checked' : '') + '></label>'
+        + '<label class="switch"><div><div class="name">Entropy detection</div><div class="desc">Detect high-entropy payload/probing query strings.</div></div><input id="det_enableEntropyDetection" type="checkbox" ' + (d.enableEntropyDetection !== false ? 'checked' : '') + '></label>'
+        + '<label class="switch"><div><div class="name">Request smuggling detection</div><div class="desc">Flag CL+TE and invalid transfer-encoding patterns.</div></div><input id="det_enableRequestSmugglingDetection" type="checkbox" ' + (d.enableRequestSmugglingDetection !== false ? 'checked' : '') + '></label>'
+        + '<label class="switch"><div><div class="name">Path spray detection</div><div class="desc">Detect high path diversity scan bursts.</div></div><input id="det_enablePathSprayDetection" type="checkbox" ' + (d.enablePathSprayDetection !== false ? 'checked' : '') + '></label>'
+        + '<label class="switch"><div><div class="name">Non-GET burst detection</div><div class="desc">Detect write-heavy bursts from same source.</div></div><input id="det_enableNonGetBurstDetection" type="checkbox" ' + (d.enableNonGetBurstDetection !== false ? 'checked' : '') + '></label>'
+        + '</div>'
+        + '<div class="field-row"><label class="label" for="det_customScannerUaPatterns">Custom scanner UA patterns (one per line)</label><textarea id="det_customScannerUaPatterns" class="field" rows="4">' + esc(listToText(d.customScannerUaPatterns || [])) + '</textarea></div>'
+        + '<div class="field-row"><label class="label" for="det_customAttackPathPatterns">Custom attack/path patterns (one per line)</label><textarea id="det_customAttackPathPatterns" class="field" rows="4">' + esc(listToText(d.customAttackPathPatterns || [])) + '</textarea></div>'
+        + '<div class="field-row"><label class="label" for="det_customSqliPatterns">Custom SQLi patterns (one per line)</label><textarea id="det_customSqliPatterns" class="field" rows="3">' + esc(listToText(d.customSqliPatterns || [])) + '</textarea></div>'
+        + '<div class="field-row"><label class="label" for="det_customXssPatterns">Custom XSS patterns (one per line)</label><textarea id="det_customXssPatterns" class="field" rows="3">' + esc(listToText(d.customXssPatterns || [])) + '</textarea></div>'
+        + '<div class="field-row"><label class="label" for="det_customVpnAsnHints">Custom VPN/ASN hints (one per line)</label><textarea id="det_customVpnAsnHints" class="field" rows="3">' + esc(listToText(d.customVpnAsnHints || [])) + '</textarea></div>'
+        + '<div class="field-row"><label class="label" for="det_customAiCrawlerPatterns">Custom AI crawler patterns (one per line)</label><textarea id="det_customAiCrawlerPatterns" class="field" rows="3">' + esc(listToText(d.customAiCrawlerPatterns || [])) + '</textarea></div>'
+        + '<div class="field-row"><label class="label" for="det_extraHoneypotPaths">Extra honeypot paths (one per line)</label><textarea id="det_extraHoneypotPaths" class="field" rows="3">' + esc(listToText(p.extraHoneypotPaths || [])) + '</textarea></div>'
+        + '<div class="field-row"><label class="label" for="det_extraVpnHints">Extra VPN hints (one per line)</label><textarea id="det_extraVpnHints" class="field" rows="3">' + esc(listToText(p.extraVpnHints || [])) + '</textarea></div>'
+        + '<div class="btns" style="margin-top:12px"><button id="saveDetectionConfigBtn" class="btn primary" type="button">Save Advanced Detection</button></div>'
         + '</article>'
         + '<article class="panel danger-zone" style="margin-top:10px">'
         + '<div class="panel-head"><div><h2 class="panel-title">High impact actions</h2><p class="panel-sub">Fast path for emergency IP moderation.</p></div></div>'
@@ -1706,6 +1754,85 @@ export function htmlShieldStats(host, initialStats = null) {
           }
         });
       });
+
+      const saveDetectionConfigBtn = document.getElementById('saveDetectionConfigBtn');
+      if (saveDetectionConfigBtn) {
+        saveDetectionConfigBtn.addEventListener('click', async function () {
+          const readNumber = function (id, fallback) {
+            const el = document.getElementById(id);
+            if (!el) return fallback;
+            const v = Number(el.value);
+            return Number.isFinite(v) ? v : fallback;
+          };
+          const readBool = function (id, fallback) {
+            const el = document.getElementById(id);
+            if (!el) return fallback;
+            return !!el.checked;
+          };
+          const readLines = function (id) {
+            const el = document.getElementById(id);
+            if (!el) return [];
+            return String(el.value || '')
+              .split('\n')
+              .map(function (line) { return String(line || '').trim(); })
+              .filter(Boolean);
+          };
+
+          const updates = {
+            extraHoneypotPaths: readLines('det_extraHoneypotPaths'),
+            extraVpnHints: readLines('det_extraVpnHints'),
+            detection: {
+              tokenBucketIpPerSec: readNumber('det_tokenBucketIpPerSec', 35),
+              tokenBucketFpPerSec: readNumber('det_tokenBucketFpPerSec', 45),
+              authWindowSeconds: readNumber('det_authWindowSeconds', 300),
+              authHardIpCount: readNumber('det_authHardIpCount', 20),
+              authHardFpCount: readNumber('det_authHardFpCount', 25),
+              attackMemoryAutoBlockCount: readNumber('det_attackMemoryAutoBlockCount', 25),
+              attackMemoryWindowSeconds: readNumber('det_attackMemoryWindowSeconds', 86400),
+              ipReputationAutoBlockScore: readNumber('det_ipReputationAutoBlockScore', 80),
+              ipReputationWeight: readNumber('det_ipReputationWeight', 0.25),
+              scoreBlockThreshold: readNumber('det_scoreBlockThreshold', 85),
+              scorePowHardThreshold: readNumber('det_scorePowHardThreshold', 60),
+              scorePowThreshold: readNumber('det_scorePowThreshold', 30),
+              scorePowLiteThreshold: readNumber('det_scorePowLiteThreshold', 15),
+              botSignalWeight: readNumber('det_botSignalWeight', 0.45),
+              aiSignalWeight: readNumber('det_aiSignalWeight', 0.5),
+              scannerSignalWeight: readNumber('det_scannerSignalWeight', 0.55),
+              anomalySignalWeight: readNumber('det_anomalySignalWeight', 0.45),
+              spoofSignalWeight: readNumber('det_spoofSignalWeight', 0.55),
+              enableSsrfDetection: readBool('det_enableSsrfDetection', true),
+              enableGraphqlIntrospectionDetection: readBool('det_enableGraphqlIntrospectionDetection', true),
+              enableHeaderInjectionDetection: readBool('det_enableHeaderInjectionDetection', true),
+              enableJwtNoneDetection: readBool('det_enableJwtNoneDetection', true),
+              enableEntropyDetection: readBool('det_enableEntropyDetection', true),
+              enableRequestSmugglingDetection: readBool('det_enableRequestSmugglingDetection', true),
+              enablePathSprayDetection: readBool('det_enablePathSprayDetection', true),
+              enableNonGetBurstDetection: readBool('det_enableNonGetBurstDetection', true),
+              customScannerUaPatterns: readLines('det_customScannerUaPatterns'),
+              customAttackPathPatterns: readLines('det_customAttackPathPatterns'),
+              customSqliPatterns: readLines('det_customSqliPatterns'),
+              customXssPatterns: readLines('det_customXssPatterns'),
+              customVpnAsnHints: readLines('det_customVpnAsnHints'),
+              customAiCrawlerPatterns: readLines('det_customAiCrawlerPatterns'),
+            },
+          };
+
+          saveDetectionConfigBtn.disabled = true;
+          try {
+            const result = await api('/__shield/admin/protection', {
+              method: 'POST',
+              body: JSON.stringify({ updates: updates }),
+            });
+            runtimePolicy = result.policy || runtimePolicy;
+            showToast('Advanced detection settings saved', 'ok');
+            await renderDashboard();
+          } catch (err) {
+            showToast(err && err.message ? err.message : 'Failed to save advanced detection settings', 'error');
+          } finally {
+            saveDetectionConfigBtn.disabled = false;
+          }
+        });
+      }
 
       const addSiteBtn = document.getElementById('addSiteBtn');
       if (addSiteBtn) {

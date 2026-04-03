@@ -121,7 +121,9 @@ export function detectTrafficBurst(ip, nowMs, asn = '') {
 }
 
 // ─── Request Pattern Analysis ────────────────────────────────────
-export function analyzeRequestPattern(ip, pathname, queryString, nowMs, method = 'GET') {
+export function analyzeRequestPattern(ip, pathname, queryString, nowMs, method = 'GET', options = {}) {
+  const pathSprayEnabled = options.enablePathSprayDetection !== false;
+  const nonGetBurstEnabled = options.enableNonGetBurstDetection !== false;
   const key = `pattern:${ip}`;
   cleanupPatternTracking(nowMs);
   let state = pathTracking.get(key);
@@ -187,13 +189,13 @@ export function analyzeRequestPattern(ip, pathname, queryString, nowMs, method =
     result.patternScore += 10; // scanning/discovery behavior
   }
 
-  if (uniquePaths >= PATH_SPRAY_THRESHOLD && state.totalRequests >= 30) {
+  if (pathSprayEnabled && uniquePaths >= PATH_SPRAY_THRESHOLD && state.totalRequests >= 30) {
     result.pathSpray = true;
     result.patternScore += 14;
   }
 
   const nonGetCount = state.totalRequests - Number(state.methods.GET || 0);
-  if (nonGetCount >= NON_GET_BURST_THRESHOLD && (nonGetCount / Math.max(1, state.totalRequests)) >= 0.55) {
+  if (nonGetBurstEnabled && nonGetCount >= NON_GET_BURST_THRESHOLD && (nonGetCount / Math.max(1, state.totalRequests)) >= 0.55) {
     result.nonGetBurst = true;
     result.patternScore += 9;
   }

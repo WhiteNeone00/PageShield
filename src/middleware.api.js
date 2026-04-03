@@ -16,20 +16,46 @@ import {
   setDynamicBlacklist,
 } from './engine.blacklist.js';
 
+const KV_DISABLED_VALUES = new Set(['1', 'true', 'yes', 'on']);
+const whitelistExtraMemory = new Set();
+
+function isKvDisabled(env) {
+  const raw = String(env?.DISABLE_KV || env?.SHIELD_KV_DISABLED || '').trim().toLowerCase();
+  return KV_DISABLED_VALUES.has(raw);
+}
+
+function canUseKv(env) {
+  return !!env?.SHIELD_KV && !isKvDisabled(env);
+}
+
 function normalizeIpSet(values) {
   return [...new Set((values || []).map((value) => normalizeIp(value)).filter(Boolean))];
 }
 
 async function readWhitelistExtraIps(env) {
-  if (!env?.SHIELD_KV) return [];
-  const raw = await env.SHIELD_KV.get(WHITELIST_EXTRA_KEY, 'json');
-  return normalizeIpSet(parseIpListPayload(raw));
+  if (!canUseKv(env)) return [...whitelistExtraMemory];
+  try {
+    const raw = await env.SHIELD_KV.get(WHITELIST_EXTRA_KEY, 'json');
+    const normalized = normalizeIpSet(parseIpListPayload(raw));
+    whitelistExtraMemory.clear();
+    normalized.forEach((ip) => whitelistExtraMemory.add(ip));
+    return normalized;
+  } catch {
+    return [...whitelistExtraMemory];
+  }
 }
 
 async function writeWhitelistExtraIps(env, ips) {
-  if (!env?.SHIELD_KV) return;
   const normalized = normalizeIpSet(ips);
-  await env.SHIELD_KV.put(WHITELIST_EXTRA_KEY, JSON.stringify(normalized), { expirationTtl: 3650 * 24 * 3600 });
+  whitelistExtraMemory.clear();
+  normalized.forEach((ip) => whitelistExtraMemory.add(ip));
+  if (!canUseKv(env)) return false;
+  try {
+    await env.SHIELD_KV.put(WHITELIST_EXTRA_KEY, JSON.stringify(normalized), { expirationTtl: 3650 * 24 * 3600 });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 // ─── Stats API ───────────────────────────────────────────────────
@@ -48,11 +74,15 @@ export async function handleStatsApi(env) {
     lastFetched: blacklistLastFetched ? new Date(blacklistLastFetched).toISOString() : null,
   };
 
-  if (env?.SHIELD_KV) {
+  if (canUseKv(env)) {
     const keys = ['passed', 'blocked', 'failed', 'expired', 'honeypot', 'challenged', 'attack', 'total'];
     const kv = {};
     for (const k of keys) {
-      kv[k] = parseInt((await env.SHIELD_KV.get('stats:' + day + ':' + k)) || '0', 10);
+      try {
+        kv[k] = parseInt((await env.SHIELD_KV.get('stats:' + day + ':' + k)) || '0', 10);
+      } catch {
+        kv[k] = 0;
+      }
     }
     result.kv = kv;
   }
@@ -87,7 +117,7 @@ export async function handleStatsApi(env) {
   }
 
   // DDOS prevented traffic
-  if (env?.SHIELD_KV) {
+  if (canUseKv(env)) {
     try {
       const prevented = await kvGetJson(env, 'shield:ddos:prevented:' + day);
       result.ddosPrevented = prevented || { requests: 0, bytes: 0 };
@@ -95,7 +125,7 @@ export async function handleStatsApi(env) {
   }
 
   // Active penalties
-  if (env?.SHIELD_KV) {
+  if (canUseKv(env)) {
     try {
       const penaltyList = await env.SHIELD_KV.list({ prefix: 'shield:penalty:ip:', limit: 100 });
       const activePenalties = [];
@@ -112,7 +142,7 @@ export async function handleStatsApi(env) {
   }
 
   // Deployed version
-  if (env?.SHIELD_KV) {
+  if (canUseKv(env)) {
     try {
       const deployed = await env.SHIELD_KV.get('shield:meta:deployed_version');
       result.deployedVersion = deployed || null;
@@ -185,8 +215,10 @@ export async function handleBlacklistUpdate(env, request) {
     });
   }
 
-  if (env?.SHIELD_KV) {
-    await env.SHIELD_KV.put(BLACKLIST_KEY, JSON.stringify(ips), { expirationTtl: LIST_CACHE_TTL * 24 });
+  if (canUseKv(env)) {
+    try {
+      await env.SHIELD_KV.put(BLACKLIST_KEY, JSON.stringify(ips), { expirationTtl: LIST_CACHE_TTL * 24 });
+    } catch {}
   }
 
   const merged = getMergedStaticBlacklist(env);
@@ -225,7 +257,7 @@ export async function handleUnblacklist(env, request, requesterIp = '') {
     remoteBlacklistRemoved: false,
   };
 
-  if (env?.SHIELD_KV) {
+  if (canUseKv(env)) {
     const penaltyKey = `shield:penalty:ip:${targetIp}`;
     const attackKey = `shield:attacks:ip:${targetIp}`;
 
@@ -330,9 +362,11 @@ export async function handleListUpdate(env, request) {
     version: String(newLists.version || 'api-manual'),
     source: 'api',
   };
-  if (env?.SHIELD_KV) {
-    await env.SHIELD_KV.put('remote:lists', JSON.stringify(storedLists), { expirationTtl: LIST_CACHE_TTL * 24 });
-    await env.SHIELD_KV.put('remote:lists:last_good', JSON.stringify(storedLists), { expirationTtl: LIST_CACHE_TTL * 24 * 7 });
+  if (canUseKv(env)) {
+    try {
+      await env.SHIELD_KV.put('remote:lists', JSON.stringify(storedLists), { expirationTtl: LIST_CACHE_TTL * 24 });
+      await env.SHIELD_KV.put('remote:lists:last_good', JSON.stringify(storedLists), { expirationTtl: LIST_CACHE_TTL * 24 * 7 });
+    } catch {}
   }
   setListsState(storedLists);
   return new Response(JSON.stringify({

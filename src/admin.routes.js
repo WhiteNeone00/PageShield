@@ -1,6 +1,52 @@
 import { normalizeIp, parseIpListPayload, securityHeaders, parseCookies } from './core.utils.js';
 import { listSites, addSite, removeSite, updateSite } from './engine.sites.js';
-import { DEFAULT_POLICY, BLACKLIST_KEY, WHITELIST_EXTRA_KEY, POLICY_KEY } from './core.config.js';
+import { getMergedStaticBlacklist, setDynamicBlacklist } from './engine.blacklist.js';
+import {
+  DEFAULT_POLICY,
+  DEFAULT_DETECTION_CONFIG,
+  BLACKLIST_KEY,
+  WHITELIST_EXTRA_KEY,
+  POLICY_KEY,
+  normalizeShieldPolicy,
+} from './core.config.js';
+
+const KV_DISABLED_VALUES = new Set(['1', 'true', 'yes', 'on']);
+
+const memoryState = {
+  [BLACKLIST_KEY]: [],
+  [WHITELIST_EXTRA_KEY]: [],
+  policy: normalizeShieldPolicy({ ...DEFAULT_POLICY }),
+  penalties: new Map(),
+};
+
+function isKvDisabled(env) {
+  const raw = String(env?.DISABLE_KV || env?.SHIELD_KV_DISABLED || '').trim().toLowerCase();
+  return KV_DISABLED_VALUES.has(raw);
+}
+
+function canUseKv(env) {
+  return !!env?.SHIELD_KV && !isKvDisabled(env);
+}
+
+function ipArrayMemoryKey(key) {
+  return key === WHITELIST_EXTRA_KEY ? WHITELIST_EXTRA_KEY : BLACKLIST_KEY;
+}
+
+function syncRuntimeBlacklist(env, ips) {
+  const merged = getMergedStaticBlacklist(env);
+  for (const ip of normalizedIps(ips)) {
+    merged.add(ip);
+  }
+  setDynamicBlacklist(merged);
+}
+
+export function getInMemoryWhitelistExtraIps() {
+  return [...(memoryState[WHITELIST_EXTRA_KEY] || [])];
+}
+
+export function getInMemoryPolicySnapshot() {
+  return sanitizePolicy(memoryState.policy || { ...DEFAULT_POLICY });
+}
 
 function json(body, status = 200) {
   return new Response(JSON.stringify(body, null, 2), {
@@ -76,14 +122,32 @@ function normalizedIps(input) {
 }
 
 async function readIpArray(env, key) {
-  if (!env?.SHIELD_KV) return [];
-  const raw = await env.SHIELD_KV.get(key, 'json');
-  return normalizedIps(raw);
+  const memoryKey = ipArrayMemoryKey(key);
+  if (!canUseKv(env)) return [...memoryState[memoryKey]];
+  try {
+    const raw = await env.SHIELD_KV.get(key, 'json');
+    const normalized = normalizedIps(raw);
+    memoryState[memoryKey] = normalized;
+    return [...normalized];
+  } catch {
+    return [...memoryState[memoryKey]];
+  }
 }
 
 async function writeIpArray(env, key, ips) {
-  if (!env?.SHIELD_KV) return;
-  await env.SHIELD_KV.put(key, JSON.stringify(normalizedIps(ips)), { expirationTtl: 3650 * 24 * 3600 });
+  const memoryKey = ipArrayMemoryKey(key);
+  const normalized = normalizedIps(ips);
+  memoryState[memoryKey] = normalized;
+  if (key === BLACKLIST_KEY) {
+    syncRuntimeBlacklist(env, normalized);
+  }
+  if (!canUseKv(env)) return false;
+  try {
+    await env.SHIELD_KV.put(key, JSON.stringify(normalized), { expirationTtl: 3650 * 24 * 3600 });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function normalizeStringList(value) {
@@ -92,34 +156,35 @@ function normalizeStringList(value) {
 }
 
 function sanitizePolicy(raw = {}) {
-  const input = raw && typeof raw === 'object' ? raw : {};
-  return {
-    protectEnabled: input.protectEnabled !== false,
-    rateLimitEnabled: input.rateLimitEnabled !== false,
-    attackBlockEnabled: input.attackBlockEnabled !== false,
-    honeypotEnabled: input.honeypotEnabled !== false,
-    aiCrawlerBlockEnabled: input.aiCrawlerBlockEnabled !== false,
-    ddosBlockEnabled: input.ddosBlockEnabled !== false,
-    vpnBlockEnabled: input.vpnBlockEnabled !== false,
-    extraHoneypotPaths: normalizeStringList(input.extraHoneypotPaths || []),
-    extraVpnHints: normalizeStringList(input.extraVpnHints || []),
-  };
+  return normalizeShieldPolicy(raw);
 }
 
 async function readPolicy(env) {
-  if (!env?.SHIELD_KV) return { ...DEFAULT_POLICY };
-  const raw = await env.SHIELD_KV.get(POLICY_KEY, 'json');
-  return sanitizePolicy({ ...DEFAULT_POLICY, ...(raw || {}) });
+  if (!canUseKv(env)) return sanitizePolicy(memoryState.policy || { ...DEFAULT_POLICY });
+  try {
+    const raw = await env.SHIELD_KV.get(POLICY_KEY, 'json');
+    const normalized = sanitizePolicy({ ...DEFAULT_POLICY, ...(raw || {}) });
+    memoryState.policy = normalized;
+    return normalized;
+  } catch {
+    return sanitizePolicy(memoryState.policy || { ...DEFAULT_POLICY });
+  }
 }
 
 async function writePolicy(env, policy) {
-  if (!env?.SHIELD_KV) return;
   const safe = sanitizePolicy(policy);
-  await env.SHIELD_KV.put(POLICY_KEY, JSON.stringify(safe), { expirationTtl: 3650 * 24 * 3600 });
+  memoryState.policy = safe;
+  if (!canUseKv(env)) return false;
+  try {
+    await env.SHIELD_KV.put(POLICY_KEY, JSON.stringify(safe), { expirationTtl: 3650 * 24 * 3600 });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function suspendIp(env, ip, reason = 'Admin suspend', durationSeconds = 0, permanent = true) {
-  if (!env?.SHIELD_KV || !ip) return null;
+  if (!ip) return null;
   const nowIso = new Date().toISOString();
   const nowSec = Math.floor(Date.now() / 1000);
   const ttl = permanent
@@ -140,7 +205,12 @@ async function suspendIp(env, ip, reason = 'Admin suspend', durationSeconds = 0,
     reasons: [{ at: nowIso, reason: String(reason || 'Admin suspend').slice(0, 120), rayId: 'admin-route' }],
   };
 
-  await env.SHIELD_KV.put(`shield:penalty:ip:${ip}`, JSON.stringify(state), { expirationTtl: ttl });
+  memoryState.penalties.set(ip, state);
+  if (canUseKv(env)) {
+    try {
+      await env.SHIELD_KV.put(`shield:penalty:ip:${ip}`, JSON.stringify(state), { expirationTtl: ttl });
+    } catch {}
+  }
   return state;
 }
 
@@ -157,30 +227,50 @@ async function requireAdminAuth(request, env) {
 }
 
 async function clearIpSecurityState(env, ip) {
-  if (!env?.SHIELD_KV || !ip) return { powFailKeysCleared: 0 };
+  if (!ip) return { powFailKeysCleared: 0, blacklistRemoved: false };
 
-  await env.SHIELD_KV.delete(`shield:rep:ip:${ip}`);
-  await env.SHIELD_KV.delete(`shield:penalty:ip:${ip}`);
-  await env.SHIELD_KV.delete(`shield:attacks:ip:${ip}`);
+  memoryState.penalties.delete(ip);
+  const currentMemoryBlacklist = memoryState[BLACKLIST_KEY] || [];
+  const nextMemoryBlacklist = currentMemoryBlacklist.filter((value) => value !== ip);
+  const memoryBlacklistRemoved = nextMemoryBlacklist.length !== currentMemoryBlacklist.length;
+  memoryState[BLACKLIST_KEY] = nextMemoryBlacklist;
+  syncRuntimeBlacklist(env, nextMemoryBlacklist);
+
+  if (!canUseKv(env)) {
+    return { powFailKeysCleared: 0, blacklistRemoved: memoryBlacklistRemoved };
+  }
+
+  try { await env.SHIELD_KV.delete(`shield:rep:ip:${ip}`); } catch {}
+  try { await env.SHIELD_KV.delete(`shield:penalty:ip:${ip}`); } catch {}
+  try { await env.SHIELD_KV.delete(`shield:attacks:ip:${ip}`); } catch {}
 
   let powFailKeysCleared = 0;
-  let cursor;
-  do {
-    const listed = await env.SHIELD_KV.list({ prefix: `shield:pow:fail:${ip}:`, cursor, limit: 1000 });
-    for (const key of (listed.keys || [])) {
-      await env.SHIELD_KV.delete(key.name);
-      powFailKeysCleared += 1;
-    }
-    cursor = listed.list_complete ? undefined : listed.cursor;
-  } while (cursor);
+  try {
+    let cursor;
+    do {
+      const listed = await env.SHIELD_KV.list({ prefix: `shield:pow:fail:${ip}:`, cursor, limit: 1000 });
+      for (const key of (listed.keys || [])) {
+        try {
+          await env.SHIELD_KV.delete(key.name);
+          powFailKeysCleared += 1;
+        } catch {}
+      }
+      cursor = listed.list_complete ? undefined : listed.cursor;
+    } while (cursor);
+  } catch {}
 
   const blacklist = await readIpArray(env, BLACKLIST_KEY);
   const nextBlacklist = blacklist.filter((value) => value !== ip);
+  let kvBlacklistRemoved = false;
   if (nextBlacklist.length !== blacklist.length) {
+    kvBlacklistRemoved = true;
     await writeIpArray(env, BLACKLIST_KEY, nextBlacklist);
   }
 
-  return { powFailKeysCleared, blacklistRemoved: nextBlacklist.length !== blacklist.length };
+  return {
+    powFailKeysCleared,
+    blacklistRemoved: kvBlacklistRemoved || memoryBlacklistRemoved,
+  };
 }
 
 async function getDashboardStats(env) {
@@ -271,10 +361,6 @@ export async function handleAdminRoutes(request, env, requesterIp = '') {
   const method = request.method;
 
   if (!path.startsWith('/__shield/admin')) return null;
-
-  if (!env?.SHIELD_KV) {
-    return json({ ok: false, error: 'SHIELD_KV not configured' }, 500);
-  }
 
   if (path === '/__shield/admin/login' && method === 'POST') {
     let payload = {};
@@ -413,8 +499,11 @@ export async function handleAdminRoutes(request, env, requesterIp = '') {
     try { payload = await request.json(); } catch {}
     const targetIp = normalizeIp(payload?.ip || requesterIp);
     if (!targetIp) return json({ ok: false, error: 'No valid target IP provided' }, 400);
-    if (env?.SHIELD_KV) {
-      await env.SHIELD_KV.delete(`shield:penalty:ip:${targetIp}`);
+    memoryState.penalties.delete(targetIp);
+    if (canUseKv(env)) {
+      try {
+        await env.SHIELD_KV.delete(`shield:penalty:ip:${targetIp}`);
+      } catch {}
     }
     return json({ ok: true, targetIp, unsuspended: true });
   }
@@ -422,6 +511,14 @@ export async function handleAdminRoutes(request, env, requesterIp = '') {
   if (path === '/__shield/admin/protection' && method === 'GET') {
     const policy = await readPolicy(env);
     return json({ ok: true, policy });
+  }
+
+  if (path === '/__shield/admin/protection/schema' && method === 'GET') {
+    return json({
+      ok: true,
+      defaults: normalizeShieldPolicy(DEFAULT_POLICY),
+      detectionDefaults: { ...DEFAULT_DETECTION_CONFIG },
+    });
   }
 
   if (path === '/__shield/admin/protection' && method === 'POST') {

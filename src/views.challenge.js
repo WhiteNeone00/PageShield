@@ -529,13 +529,40 @@ export function htmlChallenge(host, rayId, colo, utcTime, threatScore) {
   var jsDelayMs=0;
   setTimeout(function(){jsDelayMs=Math.round(performance.now()-jsExecStart);},100);
 
+  function fetchJsonStrict(url,opts){
+    return fetch(url,opts).then(function(res){
+      var contentType=String(res.headers.get('content-type')||'').toLowerCase();
+      if(!contentType.includes('application/json')){
+        var nonJsonError=new Error('non_json_response');
+        nonJsonError.status=res.status;
+        nonJsonError.redirect=true;
+        throw nonJsonError;
+      }
+      return res.json().then(function(data){
+        if(!res.ok){
+          var failedError=new Error((data&&data.error)||('http_'+String(res.status)));
+          failedError.status=res.status;
+          failedError.body=data||null;
+          if(res.status>=400) failedError.redirect=true;
+          throw failedError;
+        }
+        return data;
+      });
+    });
+  }
+
   collectFingerprint().then(function(fpHash){
     if(statusEl) statusEl.textContent='Initializing security check\\u2026';
-    return fetch('/__challenge?fp='+encodeURIComponent(fpHash),{
+    return fetchJsonStrict('/__challenge?fp='+encodeURIComponent(fpHash),{
       method:'GET',
       credentials:'include',
       headers:{'x-shield-fp':fpHash}
-    }).then(function(r){return r.json()}).then(function(challenge){
+    }).then(function(challenge){
+      if(!challenge||!challenge.prefix||!challenge.challengeId){
+        var malformedError=new Error('invalid_challenge_response');
+        malformedError.redirect=true;
+        throw malformedError;
+      }
       if(statusEl) statusEl.textContent='Solving proof-of-work\\u2026';
       return solvePoW(challenge.prefix,challenge.difficulty).then(function(solution){
         if(statusEl) statusEl.textContent='Analyzing behavior\\u2026';
@@ -544,7 +571,7 @@ export function htmlChallenge(host, rayId, colo, utcTime, threatScore) {
         var clientSnapshot=collectClientSnapshot();
         clientSnapshot.jsDelayMs=jsDelayMs;
         if(statusEl) statusEl.textContent='Verifying identity\\u2026';
-        return fetch('/__verify',{
+        return fetchJsonStrict('/__verify',{
           method:'POST',
           credentials:'include',
           headers:{'content-type':'application/json'},
@@ -563,7 +590,7 @@ export function htmlChallenge(host, rayId, colo, utcTime, threatScore) {
             honeypot:honeypotData,
             client:clientSnapshot
           })
-        }).then(function(res){return res.json()});
+        });
       });
     });
   }).then(function(json){
@@ -588,9 +615,14 @@ export function htmlChallenge(host, rayId, colo, utcTime, threatScore) {
         setTimeout(function(){window.location.href=window.location.href;},2000);
       }
     },wait);
-  })['catch'](function(){
+  })['catch'](function(err){
+    if(err&&err.redirect){
+      if(statusEl) statusEl.textContent='Security state updated \\u2014 loading protection page\\u2026';
+      setTimeout(function(){window.location.replace(window.location.href);},450);
+      return;
+    }
     if(statusEl) statusEl.textContent='Error \\u2014 retrying\\u2026';
-    setTimeout(function(){window.location.href=window.location.href;},2000);
+    setTimeout(function(){window.location.replace(window.location.href);},2000);
   });
 
   var s=10;

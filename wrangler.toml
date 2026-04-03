@@ -32,3 +32,4 @@ bucket_name = "shield-storage"
 [vars]
 IP_WHITELIST_EXTRA = ""
 ADMIN_PASSWORD = "admin999"
+DISABLE_KV = "1"
