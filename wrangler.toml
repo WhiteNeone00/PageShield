@@ -11,10 +11,9 @@ version_metadata = { binding = "SHIELD_VERSION_METADATA" }
 # - Explicitly protect all on www.ryzeon.wtf/*
 # - Protect all on *.ryzeon.wtf/*
 routes = [
-  { pattern = "eu-api.ryzeon.wtf/*", zone_name = "ryzeon.wtf" },
-  { pattern = "ryzeon.wtf/*", zone_name = "ryzeon.wtf" },
+  { pattern = "eu-api.ryzeon.wtf/", zone_name = "ryzeon.wtf" },
   { pattern = "www.ryzeon.wtf/*", zone_name = "ryzeon.wtf" },
-  { pattern = "*.ryzeon.wtf/*", zone_name = "ryzeon.wtf" },
+  { pattern = "*.ryzeon.wtf/", zone_name = "ryzeon.wtf" },
 ]
 
 # ── KV namespace for analytics counters ──
