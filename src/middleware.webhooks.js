@@ -85,8 +85,8 @@ function eventMeta(eventType) {
     BOT_FARM: { icon: '🐜', banner: 'Bot Farm Detected', status: 'Blocked' },
     COUNTRY_BLOCKED: { icon: '🌍', banner: 'Country Policy Block', status: 'Blocked' },
     VPN_BLOCKED: { icon: '🕶️', banner: 'VPN / Proxy Block', status: 'Blocked' },
-    DEPLOYED: { icon: '🚀', banner: 'System Upgrade Completed', status: 'Live' },
-    SYSTEM_UPDATE: { icon: '🆙', banner: 'System Upgrade Completed', status: 'Live' },
+    DEPLOYED: { icon: '🚀', banner: 'PageShield Updated & Running', status: 'Live' },
+    SYSTEM_UPDATE: { icon: '🆙', banner: 'PageShield Updated & Running', status: 'Live' },
     ERROR: { icon: '⚠️', banner: 'System Error', status: 'Attention' },
   };
   return map[eventType] || { icon: '📌', banner: 'Security Event', status: 'Active' };
@@ -330,8 +330,8 @@ export async function sendDiscordWebhook(env, eventType, reason, details) {
   const description = isDeployEvent
     ? [
         '```ansi',
-        `${A.bCyan}${eventType === 'DEPLOYED' ? '◆ SOURCE UPDATE' : '◆ SYSTEM UPDATE'}${A.reset}`,
-        `${A.white}Release: ${A.bWhite}${clip(String(details._releaseFrom || 'initial') + ' → ' + String(details._releaseTo || 'latest'), 60)}${A.reset}`,
+        `${A.bGreen}${eventType === 'DEPLOYED' ? '◆ DEPLOYED RUNNING' : '◆ SYSTEM UPDATED'}${A.reset}`,
+        `${A.white}Status: ${A.bWhite}PageShield got updated and is running live${A.reset}`,
         `${A.white}Build:   ${A.gray}${clip(shortVersionId(details._previousDeployedVersion || 'none') + ' → ' + shortVersionId(details._deployedVersion || 'latest'), 40)}${A.reset}`,
         `${A.white}Source:  ${A.gray}${clip(String(details._sourceRevision || 'unknown'), 40)}${A.reset}`,
         '```',
@@ -341,7 +341,19 @@ export async function sendDiscordWebhook(env, eventType, reason, details) {
   // ── Fields ──
   const fields = [];
 
+  if (isDeployEvent) {
+    fields.push({
+      name: '✅ Deployment',
+      value: '```ansi\n'
+        + `${A.white}PageShield got updated and deployed successfully.${A.reset}\n`
+        + `${A.white}Status:${A.reset} ${A.bGreen}Running${A.reset}\n`
+        + '```',
+      inline: false,
+    });
+  }
+
   // Top summary (clean side-by-side blocks)
+  if (!isDeployEvent) {
   const countryCode = String(details.country || '').trim().toUpperCase();
   const locValue = /^[A-Z]{2}$/.test(countryCode)
     ? `${countryLabel(details.country)} (${countryCode})`
@@ -395,6 +407,7 @@ export async function sendDiscordWebhook(env, eventType, reason, details) {
       + '```',
     inline: true,
   });
+  }
 
   // Security Scan + Factors (side-by-side in one block)
   const visibleLen = (text) => String(text || '').replace(/\u001b\[[0-9;]*m/g, '').length;
@@ -451,26 +464,6 @@ export async function sendDiscordWebhook(env, eventType, reason, details) {
     fields.push({
       name: `🔍 Scan Results  ·  ${detectionCount} detection${detectionCount !== 1 ? 's' : ''}  ·  📊 Factors`,
       value: '```ansi\n' + combinedLines.join('\n') + '\n```',
-      inline: false,
-    });
-  } else {
-    const mark = (on) => on ? `${A.bRed}■${A.reset}` : `${A.green}□${A.reset}`;
-    const scanItem = (label, on) => `${mark(on)} ${(on ? A.white : A.gray)}${label}${A.reset}`;
-    const scanOnly = [
-      `${ansiPadEnd(scanItem('Bot', details._suspicious), scanPairWidth)} ${scanItem('Headless', details._headless)}`,
-      `${ansiPadEnd(scanItem('VPN/Proxy', details._vpn), scanPairWidth)} ${scanItem('AI Crawl', details._aiCrawler)}`,
-      `${ansiPadEnd(scanItem('DDoS', details._ddosSuspect), scanPairWidth)} ${scanItem('Rate Lim', details._spam)}`,
-      `${ansiPadEnd(scanItem('Bot Farm', details._isBotFarm), scanPairWidth)} ${scanItem('Attack', hasAttack)}`,
-      `${ansiPadEnd(scanItem('Smuggle', details._requestSmugglingSignal), scanPairWidth)} ${scanItem('Cookie Abuse', Number(details._cookieHeaderLength || 0) > 2500)}`,
-      `${ansiPadEnd(scanItem('Cmd Client', details._commandLineClient), scanPairWidth)} ${scanItem('Data Crawler', details._dataCrawlerUa)}`,
-      `${ansiPadEnd(scanItem('Proxy Hdr', details._proxyHeaderAnomaly), scanPairWidth)} ${scanItem('Long URL', details._longUrlSignal)}`,
-      `${ansiPadEnd(scanItem('Method Tunnel', details._methodTunnelingSignal || details._methodTunnelProbe), scanPairWidth)} ${scanItem('Encoding Evade', details._encodingEvasionSignal || details._encodingEvasion)}`,
-      `${ansiPadEnd(scanItem('ProtoPoll', details._prototypePollution), scanPairWidth)} ${scanItem('Deserialize', details._deserializationProbe)}`,
-      `${ansiPadEnd(scanItem('Open Redirect', details._openRedirectProbe), scanPairWidth)} ${scanItem('Hdr Flood', Number(details._headerCount || 0) > 48)}`,
-    ];
-    fields.push({
-      name: `🔍 Scan Results  ·  ${detectionCount} detection${detectionCount !== 1 ? 's' : ''}`,
-      value: '```ansi\n' + scanOnly.join('\n') + '\n```',
       inline: false,
     });
   }
@@ -543,8 +536,12 @@ export async function sendDiscordWebhook(env, eventType, reason, details) {
 
   // Footer parts — include penalty info
   const footerParts = ['Ryzeon Shield', eventLabel];
-  if (details._penaltyLabel) footerParts.push('⚖️ ' + details._penaltyLabel);
-  footerParts.push('Ray ' + (details.rayId || 'N/A'));
+  if (!isDeployEvent && details._penaltyLabel) footerParts.push('⚖️ ' + details._penaltyLabel);
+  if (isDeployEvent) {
+    footerParts.push('Live');
+  } else {
+    footerParts.push('Ray ' + (details.rayId || 'N/A'));
+  }
 
   const payload = {
     username: 'Ryzeon Shield',

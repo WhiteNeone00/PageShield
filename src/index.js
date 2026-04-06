@@ -1279,6 +1279,10 @@ export default {
       headers.append('set-cookie', COOKIE_FP_NAME + '=' + safeFp + '; Path=/; Max-Age=' + COOKIE_MAX_AGE + '; HttpOnly; Secure; SameSite=Lax');
       headers.append('set-cookie', COOKIE_RECHECK_NAME + '=' + String(Math.floor(Date.now() / 1000) + VERIFIED_RECHECK_COOLDOWN) + '; Path=/; Max-Age=' + VERIFIED_RECHECK_COOLDOWN + '; HttpOnly; Secure; SameSite=Lax');
 
+      baseDetails._clientType = 'user';
+      baseDetails._decision = 'allow';
+      baseDetails._passedVia = 'challenge_verify';
+
       ctx.waitUntil(storeBehaviorProfile(env, { event: 'PASSED', fpHash: safeFp, ip, asn, country }));
       ctx.waitUntil(Promise.all([
         sendDiscordWebhookDelayed(env, 'PASSED', 'Challenge Solved', baseDetails, 3000),
