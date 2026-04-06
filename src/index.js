@@ -655,6 +655,9 @@ export default {
     const shouldEmitDeployEvent = method === 'GET'
       && !isShieldChallengeApi
       && !pathLower.startsWith('/__')
+      && pathLower === '/'
+      && !verified
+      && !hasAnyShieldCookie
       && attackFlags.length === 0
       && !suspicious
       && !headless

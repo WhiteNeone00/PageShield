@@ -9,6 +9,7 @@ import { clip, severityLabel, threatBar } from './core.utils.js';
 // ─── Deployment Event State ──────────────────────────────────────
 let deploymentEventSent = false;
 let deploymentEventFingerprint = '';
+const deploymentEventInFlight = new Set();
 
 const KV_DISABLED_VALUES = new Set(['1', 'true', 'yes', 'on']);
 
@@ -250,9 +251,11 @@ export async function sendDiscordWebhook(env, eventType, reason, details) {
     return false;
   }
   const isDeployEvent = eventType === 'DEPLOYED' || eventType === 'SYSTEM_UPDATE';
-  const deployTargets = [env?.DISCORD_WEBHOOK_URL_SYSTEM, env?.DISCORD_WEBHOOK_URL, env?.DISCORD_WEBHOOK_URL_2].filter(Boolean);
+  const deployTarget = env?.DISCORD_WEBHOOK_URL_SYSTEM || env?.DISCORD_WEBHOOK_URL || env?.DISCORD_WEBHOOK_URL_2;
   const runtimeTargets = [env?.DISCORD_WEBHOOK_URL, env?.DISCORD_WEBHOOK_URL_2].filter(Boolean);
-  const webhookTargets = [...new Set(isDeployEvent ? deployTargets : runtimeTargets)];
+  const webhookTargets = isDeployEvent
+    ? (deployTarget ? [deployTarget] : [])
+    : [...new Set(runtimeTargets)];
   if (webhookTargets.length === 0) return;
   if (!DISCORD_WORTHY.has(eventType)) return;
   const cooldownState = await getWebhookCooldownState(env, eventType, details);
@@ -724,6 +727,12 @@ export async function emitDeploymentEventIfNeeded(env, details) {
   const deployFingerprint = `${version}:${sourceKeyPart}`;
 
   if (deploymentEventSent && deploymentEventFingerprint === deployFingerprint) return;
+  if (deploymentEventInFlight.has(deployFingerprint)) return;
+  deploymentEventInFlight.add(deployFingerprint);
+
+  let dbLockClaimed = false;
+
+  try {
 
   const baseRelease = String(env?.SHIELD_RELEASE_BASE || 'v4.0.0').trim();
   const bumpTypeRaw = String(env?.SHIELD_RELEASE_BUMP || 'patch').trim().toLowerCase();
@@ -768,6 +777,19 @@ export async function emitDeploymentEventIfNeeded(env, details) {
       : currentRelease;
   } else if (env?.SHIELD_DB) {
     try {
+      await env.SHIELD_DB.prepare(
+        'CREATE TABLE IF NOT EXISTS deploy_markers (fingerprint TEXT PRIMARY KEY, created_at TEXT NOT NULL)'
+      ).run();
+      const claim = await env.SHIELD_DB.prepare(
+        'INSERT OR IGNORE INTO deploy_markers (fingerprint, created_at) VALUES (?, ?)'
+      ).bind(deployFingerprint, new Date().toISOString()).run();
+      dbLockClaimed = Number(claim?.meta?.changes || 0) > 0;
+      if (!dbLockClaimed) {
+        deploymentEventSent = true;
+        deploymentEventFingerprint = deployFingerprint;
+        return;
+      }
+
       const marker = `[worker:${version}][source:${sourceKeyPart}]`;
       const existing = await env.SHIELD_DB.prepare(
         "SELECT id FROM events WHERE event IN ('SYSTEM_UPDATE','DEPLOYED') AND reason LIKE ? ORDER BY id DESC LIMIT 1"
@@ -809,7 +831,14 @@ export async function emitDeploymentEventIfNeeded(env, details) {
 
   const delivered = await sendDiscordWebhook(env, 'DEPLOYED', reason, deployDetails);
 
-  if (!delivered) return;
+  if (!delivered) {
+    if (dbLockClaimed && env?.SHIELD_DB) {
+      try {
+        await env.SHIELD_DB.prepare('DELETE FROM deploy_markers WHERE fingerprint = ?').bind(deployFingerprint).run();
+      } catch {}
+    }
+    return;
+  }
 
   if (env?.SHIELD_DB) {
     try {
@@ -829,4 +858,7 @@ export async function emitDeploymentEventIfNeeded(env, details) {
 
   deploymentEventSent = true;
   deploymentEventFingerprint = deployFingerprint;
+  } finally {
+    deploymentEventInFlight.delete(deployFingerprint);
+  }
 }
