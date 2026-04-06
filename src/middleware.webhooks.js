@@ -177,7 +177,7 @@ function webhookCooldownSeconds(eventType) {
     case 'DEPLOYED':
       return 90 * 24 * 3600;
     case 'PASSED':
-      return 30 * 60;
+      return 60;
     case 'FAILED':
       return 10 * 60;
     case 'ERROR':
