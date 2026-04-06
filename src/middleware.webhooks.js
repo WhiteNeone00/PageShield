@@ -10,6 +10,13 @@ import { clip, severityLabel, threatBar } from './core.utils.js';
 let deploymentEventSent = false;
 let deploymentEventFingerprint = '';
 
+const KV_DISABLED_VALUES = new Set(['1', 'true', 'yes', 'on']);
+
+function canUseKv(env) {
+  const raw = String(env?.DISABLE_KV || env?.SHIELD_KV_DISABLED || '').trim().toLowerCase();
+  return !!env?.SHIELD_KV && !KV_DISABLED_VALUES.has(raw);
+}
+
 // ─── In-Memory Cooldown (survives KV write-limit exhaustion) ─────
 const memCooldown = new Map();
 const MEM_COOLDOWN_MAX = 2000;
@@ -222,7 +229,7 @@ async function getWebhookCooldownState(env, eventType, details) {
   }
 
   // KV check as fallback (covers cross-isolate dedup)
-  if (env?.SHIELD_KV) {
+  if (canUseKv(env)) {
     try {
       const exists = await env.SHIELD_KV.get(key);
       if (exists === '1') {
@@ -570,7 +577,7 @@ export async function sendDiscordWebhook(env, eventType, reason, details) {
       memCooldown.set(cooldownState.key, Date.now() + cooldownState.cooldown * 1000);
       memCooldownCleanup();
       // Best-effort KV write for cross-isolate dedup
-      if (delivered && env?.SHIELD_KV) {
+      if (delivered && canUseKv(env)) {
         try {
           await env.SHIELD_KV.put(cooldownState.key, '1', { expirationTtl: cooldownState.cooldown });
         } catch { /* KV write limit — in-memory cooldown still active */ }
@@ -713,9 +720,10 @@ export async function emitDeploymentEventIfNeeded(env, details) {
     meta?.git_sha,
     meta?.commit,
   ];
-  const sourceRevision = sourceCandidates.find((v) => typeof v === 'string' && v.trim().length > 0) || null;
-  const sourceLabel = sourceRevision ? shortVersionId(sourceRevision) : 'unknown';
-  const sourceKeyPart = keyPart(sourceLabel, 32);
+  const sourceRevisionRaw = sourceCandidates.find((v) => typeof v === 'string' && v.trim().length > 0) || null;
+  const sourceRevision = String(sourceRevisionRaw || `worker-${version}`).trim();
+  const sourceLabel = sourceRevisionRaw ? shortVersionId(sourceRevisionRaw) : `worker-${shortVersionId(version)}`;
+  const sourceKeyPart = keyPart(sourceRevision, 64);
   const deployFingerprint = `${version}:${sourceKeyPart}`;
 
   if (deploymentEventSent && deploymentEventFingerprint === deployFingerprint) return;
@@ -730,7 +738,7 @@ export async function emitDeploymentEventIfNeeded(env, details) {
     ? (baseRelease.startsWith('v') ? baseRelease : `v${baseRelease}`)
     : 'v4.0.0';
 
-  const hasKv = !!env?.SHIELD_KV;
+  const hasKv = canUseKv(env);
 
   const key = 'shield:meta:deployed_version';
   const sourceKey = 'shield:meta:deployed_source_rev';
@@ -748,7 +756,7 @@ export async function emitDeploymentEventIfNeeded(env, details) {
 
     prev = await env.SHIELD_KV.get(key);
     prevSource = await env.SHIELD_KV.get(sourceKey);
-    if (prev === version && prevSource === sourceLabel) {
+    if (prev === version && prevSource === sourceRevision) {
       await env.SHIELD_KV.put(announcedVersionKey, '1', { expirationTtl: 90 * 24 * 3600 });
       deploymentEventSent = true;
       deploymentEventFingerprint = deployFingerprint;
@@ -763,7 +771,7 @@ export async function emitDeploymentEventIfNeeded(env, details) {
       : currentRelease;
   } else if (env?.SHIELD_DB) {
     try {
-      const marker = `[worker:${version}][source:${sourceLabel}]`;
+      const marker = `[worker:${version}][source:${sourceKeyPart}]`;
       const existing = await env.SHIELD_DB.prepare(
         "SELECT id FROM events WHERE event IN ('SYSTEM_UPDATE','DEPLOYED') AND reason LIKE ? ORDER BY id DESC LIMIT 1"
       ).bind(`%${marker}%`).first();
@@ -778,17 +786,28 @@ export async function emitDeploymentEventIfNeeded(env, details) {
   const workerMarker = prev
     ? `[worker:${shortVersionId(prev)}->${shortVersionId(version)}]`
     : `[worker:${shortVersionId(version)}]`;
-  const reason = `PageShield SRC GOT UPDATED AND NOW IT'S LIVE | Release ${currentRelease} | Source ${sourceLabel} ${workerMarker} [worker:${version}][source:${sourceLabel}]`;
+  const reason = `PageShield SRC GOT UPDATED AND NOW IT'S LIVE | Release ${currentRelease} | Source ${sourceLabel} ${workerMarker} [worker:${version}][source:${sourceKeyPart}]`;
+
+  const deployHost = String(details?.host || env?.SHIELD_PRIMARY_HOST || 'ryzeon.wtf').trim();
 
   const deployDetails = {
     ...details,
+    ip: 'system',
+    path: '/__deploy',
+    method: 'SYSTEM',
+    ua: 'Ryzeon Shield Deploy Watcher',
+    referer: 'N/A',
+    country: 'N/A',
+    asOrg: 'System',
+    asn: 'N/A',
+    host: deployHost,
     threatScore: 0,
     _clientType: 'system',
     _deployedVersion: version,
     _previousDeployedVersion: prev || null,
     _releaseFrom: previousRelease || 'initial',
     _releaseTo: currentRelease,
-    _sourceRevision: sourceRevision || 'unknown',
+    _sourceRevision: sourceLabel,
   };
 
   const delivered = await sendDiscordWebhook(env, 'DEPLOYED', reason, deployDetails);
@@ -804,7 +823,7 @@ export async function emitDeploymentEventIfNeeded(env, details) {
   if (hasKv) {
     try {
       await env.SHIELD_KV.put(key, version);
-      await env.SHIELD_KV.put(sourceKey, sourceLabel);
+      await env.SHIELD_KV.put(sourceKey, sourceRevision);
       await env.SHIELD_KV.put(releaseKey, currentRelease);
       await env.SHIELD_KV.put(`shield:meta:release_by_worker:${version}`, currentRelease);
       await env.SHIELD_KV.put(announcedVersionKey, '1', { expirationTtl: 90 * 24 * 3600 });

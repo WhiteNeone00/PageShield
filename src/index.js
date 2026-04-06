@@ -652,7 +652,17 @@ export default {
       });
     }
 
-    ctx.waitUntil(emitDeploymentEventIfNeeded(env, baseDetails));
+    const shouldEmitDeployEvent = method === 'GET'
+      && !isShieldChallengeApi
+      && !pathLower.startsWith('/__')
+      && attackFlags.length === 0
+      && !suspicious
+      && !headless
+      && !commandLineClient
+      && !dataCrawlerUa;
+    if (shouldEmitDeployEvent) {
+      ctx.waitUntil(emitDeploymentEventIfNeeded(env, baseDetails));
+    }
 
     // ── Attack pattern hard block ──
     if (runtimePolicy.attackBlockEnabled && attackFlags.length > 0) {
