@@ -828,7 +828,7 @@ export default {
 
     // Deploy Notify (GitHub Actions -> Worker)
     if (url.pathname === '/__shield/deploy-notify' && method === 'POST') {
-      const deployNotifyKey = String(env?.DEPLOY_NOTIFY_KEY || env?.STATS_API_KEY || '').trim();
+      const deployNotifyKey = String(env?.DEPLOY_NOTIFY_KEY || '').trim();
       if (deployNotifyKey) {
         const authHeader = request.headers.get('authorization') || '';
         const deployHeader = request.headers.get('x-shield-deploy-key') || '';
