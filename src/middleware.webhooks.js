@@ -709,9 +709,13 @@ export async function emitDeploymentEventIfNeeded(env, details) {
   ];
   const stableVersion = stableCandidates.find((v) => typeof v === 'string' && v.trim().length > 0) || null;
   const version = String(stableVersion || '').trim();
-  if (!version) return;
+  if (!version) return false;
 
   const sourceCandidates = [
+    details?._sourceRevision,
+    details?.sourceRevision,
+    details?.sha,
+    details?.source,
     env?.SHIELD_SOURCE_REV,
     env?.SOURCE_VERSION,
     env?.GITHUB_SHA,
@@ -726,8 +730,8 @@ export async function emitDeploymentEventIfNeeded(env, details) {
   const sourceKeyPart = keyPart(sourceRevision, 64);
   const deployFingerprint = `${version}:${sourceKeyPart}`;
 
-  if (deploymentEventSent && deploymentEventFingerprint === deployFingerprint) return;
-  if (deploymentEventInFlight.has(deployFingerprint)) return;
+  if (deploymentEventSent && deploymentEventFingerprint === deployFingerprint) return false;
+  if (deploymentEventInFlight.has(deployFingerprint)) return false;
   deploymentEventInFlight.add(deployFingerprint);
 
   let dbLockClaimed = false;
@@ -757,7 +761,7 @@ export async function emitDeploymentEventIfNeeded(env, details) {
     if (alreadyAnnounced === '1') {
       deploymentEventSent = true;
       deploymentEventFingerprint = deployFingerprint;
-      return;
+      return false;
     }
 
     prev = await env.SHIELD_KV.get(key);
@@ -766,7 +770,7 @@ export async function emitDeploymentEventIfNeeded(env, details) {
       await env.SHIELD_KV.put(announcedVersionKey, '1', { expirationTtl: 90 * 24 * 3600 });
       deploymentEventSent = true;
       deploymentEventFingerprint = deployFingerprint;
-      return;
+      return false;
     }
 
     const prevMappedRelease = prev ? await env.SHIELD_KV.get(`shield:meta:release_by_worker:${prev}`) : null;
@@ -787,7 +791,7 @@ export async function emitDeploymentEventIfNeeded(env, details) {
       if (!dbLockClaimed) {
         deploymentEventSent = true;
         deploymentEventFingerprint = deployFingerprint;
-        return;
+        return false;
       }
 
       const marker = `[worker:${version}][source:${sourceKeyPart}]`;
@@ -797,7 +801,7 @@ export async function emitDeploymentEventIfNeeded(env, details) {
       if (existing) {
         deploymentEventSent = true;
         deploymentEventFingerprint = deployFingerprint;
-        return;
+        return false;
       }
     } catch {}
   }
@@ -837,7 +841,7 @@ export async function emitDeploymentEventIfNeeded(env, details) {
         await env.SHIELD_DB.prepare('DELETE FROM deploy_markers WHERE fingerprint = ?').bind(deployFingerprint).run();
       } catch {}
     }
-    return;
+    return false;
   }
 
   if (env?.SHIELD_DB) {
@@ -858,6 +862,7 @@ export async function emitDeploymentEventIfNeeded(env, details) {
 
   deploymentEventSent = true;
   deploymentEventFingerprint = deployFingerprint;
+  return true;
   } finally {
     deploymentEventInFlight.delete(deployFingerprint);
   }

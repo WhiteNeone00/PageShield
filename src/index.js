@@ -827,17 +827,35 @@ export default {
     if (apiAuth('/__shield/whitelist-extra', 'POST') === 'unauthorized') return new Response('Unauthorized', { status: 401, headers: securityHeaders(new Headers()) });
 
     // Deploy Notify (GitHub Actions -> Worker)
-    if (apiAuth('/__shield/deploy-notify', 'POST') === true) {
-      await emitDeploymentEventIfNeeded(env, {
+    if (url.pathname === '/__shield/deploy-notify' && method === 'POST') {
+      const deployNotifyKey = String(env?.DEPLOY_NOTIFY_KEY || env?.STATS_API_KEY || '').trim();
+      if (deployNotifyKey) {
+        const authHeader = request.headers.get('authorization') || '';
+        const deployHeader = request.headers.get('x-shield-deploy-key') || '';
+        const bearerOk = authHeader === 'Bearer ' + deployNotifyKey;
+        const headerOk = deployHeader === deployNotifyKey;
+        if (!bearerOk && !headerOk) {
+          return new Response('Unauthorized', { status: 401, headers: securityHeaders(new Headers()) });
+        }
+      }
+
+      let body = null;
+      try {
+        body = await request.json();
+      } catch {
+        body = null;
+      }
+      const sourceRevision = String(body?.sha || body?.sourceRevision || body?.source || '').trim();
+
+      const emitted = await emitDeploymentEventIfNeeded(env, {
         ...baseDetails,
         _clientType: 'system',
+        _sourceRevision: sourceRevision || undefined,
       });
-      return new Response(JSON.stringify({ ok: true, emitted: true }), {
+
+      return new Response(JSON.stringify({ ok: true, emitted: !!emitted }), {
         headers: securityHeaders(new Headers({ 'content-type': 'application/json', 'cache-control': 'no-store' })),
       });
-    }
-    if (apiAuth('/__shield/deploy-notify', 'POST') === 'unauthorized') {
-      return new Response('Unauthorized', { status: 401, headers: securityHeaders(new Headers()) });
     }
 
     // ── PoW Challenge endpoint ──

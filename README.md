@@ -92,6 +92,7 @@ If `STATS_API_KEY` is configured, these endpoints require `Authorization: Bearer
 
 - `STATS_API_KEY`
 - `SHIELD_DEPLOY_NOTIFY_URL` (optional GitHub Actions secret; defaults to `https://www.ryzeon.wtf/__shield/deploy-notify`)
+- `DEPLOY_NOTIFY_KEY` (optional; if set, workflow sends it and endpoint accepts it for deploy-notify auth)
 
 ## Cloudflare Bindings
 

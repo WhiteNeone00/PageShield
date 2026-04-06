@@ -34,24 +34,67 @@ jobs:
 
       - name: Notify Deploy Webhook
         env:
+          DEPLOY_NOTIFY_KEY: ${{ secrets.DEPLOY_NOTIFY_KEY }}
           STATS_API_KEY: ${{ secrets.STATS_API_KEY }}
           SHIELD_DEPLOY_NOTIFY_URL: ${{ secrets.SHIELD_DEPLOY_NOTIFY_URL }}
         run: |
-          set -e
+          set -euo pipefail
           url="${SHIELD_DEPLOY_NOTIFY_URL:-https://www.ryzeon.wtf/__shield/deploy-notify}"
           payload="{\"source\":\"github-actions\",\"sha\":\"${GITHUB_SHA}\"}"
+          key="${DEPLOY_NOTIFY_KEY:-${STATS_API_KEY:-}}"
 
-          if [ -n "${STATS_API_KEY}" ]; then
-            curl --fail --show-error --silent \
-              --retry 3 --retry-delay 2 --retry-all-errors \
-              -X POST "$url" \
-              -H "authorization: Bearer ${STATS_API_KEY}" \
-              -H "content-type: application/json" \
-              --data "$payload"
-          else
-            curl --fail --show-error --silent \
-              --retry 3 --retry-delay 2 --retry-all-errors \
-              -X POST "$url" \
-              -H "content-type: application/json" \
-              --data "$payload"
+          request_once() {
+            local use_key="$1"
+            local raw=""
+            if [ -n "$use_key" ]; then
+              raw=$(curl --silent --show-error --location \
+                --connect-timeout 10 --max-time 25 \
+                -X POST "$url" \
+                -H "authorization: Bearer ${use_key}" \
+                -H "x-shield-deploy-key: ${use_key}" \
+                -H "content-type: application/json" \
+                --data "$payload" \
+                -w "\n%{http_code}" || true)
+            else
+              raw=$(curl --silent --show-error --location \
+                --connect-timeout 10 --max-time 25 \
+                -X POST "$url" \
+                -H "content-type: application/json" \
+                --data "$payload" \
+                -w "\n%{http_code}" || true)
+            fi
+            local code body
+            code=$(printf '%s' "$raw" | tail -n1)
+            body=$(printf '%s' "$raw" | sed '$d')
+            printf '%s\n%s\n' "$code" "$body"
+          }
+
+          emitted="false"
+          for attempt in $(seq 1 18); do
+            echo "Deploy notify attempt ${attempt}/18"
+            response=$(request_once "$key")
+            status=$(printf '%s' "$response" | sed -n '1p')
+            body=$(printf '%s' "$response" | sed -n '2,$p')
+
+            if [ "$status" = "401" ] && [ -n "$key" ]; then
+              echo "Auth attempt unauthorized, retrying without auth header"
+              response=$(request_once "")
+              status=$(printf '%s' "$response" | sed -n '1p')
+              body=$(printf '%s' "$response" | sed -n '2,$p')
+            fi
+
+            echo "Status: ${status}"
+            echo "Body: ${body}"
+
+            if [[ "$status" =~ ^2[0-9][0-9]$ ]] && printf '%s' "$body" | grep -q '"emitted"[[:space:]]*:[[:space:]]*true'; then
+              emitted="true"
+              echo "Deploy webhook emitted successfully"
+              break
+            fi
+
+            sleep 10
+          done
+
+          if [ "$emitted" != "true" ]; then
+            echo "Warning: deploy notify endpoint did not report emitted=true within retry window."
           fi
