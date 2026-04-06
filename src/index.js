@@ -652,20 +652,8 @@ export default {
       });
     }
 
-    const shouldEmitDeployEvent = method === 'GET'
-      && !isShieldChallengeApi
-      && !pathLower.startsWith('/__')
-      && pathLower === '/'
-      && !verified
-      && !hasAnyShieldCookie
-      && attackFlags.length === 0
-      && !suspicious
-      && !headless
-      && !commandLineClient
-      && !dataCrawlerUa;
-    if (shouldEmitDeployEvent) {
-      ctx.waitUntil(emitDeploymentEventIfNeeded(env, baseDetails));
-    }
+    // Deploy webhooks are emitted via authenticated CI endpoint (/__shield/deploy-notify)
+    // to avoid accidental deploy alerts from regular visitor traffic.
 
     // ── Attack pattern hard block ──
     if (runtimePolicy.attackBlockEnabled && attackFlags.length > 0) {
@@ -837,6 +825,20 @@ export default {
     if (apiAuth('/__shield/whitelist-extra', 'GET') === 'unauthorized') return new Response('Unauthorized', { status: 401, headers: securityHeaders(new Headers()) });
     if (apiAuth('/__shield/whitelist-extra', 'POST') === true) return handleWhitelistExtraUpdate(env, request);
     if (apiAuth('/__shield/whitelist-extra', 'POST') === 'unauthorized') return new Response('Unauthorized', { status: 401, headers: securityHeaders(new Headers()) });
+
+    // Deploy Notify (GitHub Actions -> Worker)
+    if (apiAuth('/__shield/deploy-notify', 'POST') === true) {
+      await emitDeploymentEventIfNeeded(env, {
+        ...baseDetails,
+        _clientType: 'system',
+      });
+      return new Response(JSON.stringify({ ok: true, emitted: true }), {
+        headers: securityHeaders(new Headers({ 'content-type': 'application/json', 'cache-control': 'no-store' })),
+      });
+    }
+    if (apiAuth('/__shield/deploy-notify', 'POST') === 'unauthorized') {
+      return new Response('Unauthorized', { status: 401, headers: securityHeaders(new Headers()) });
+    }
 
     // ── PoW Challenge endpoint ──
     if (url.pathname === '/__challenge' && method === 'GET') {

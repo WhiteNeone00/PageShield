@@ -91,6 +91,7 @@ If `STATS_API_KEY` is configured, these endpoints require `Authorization: Bearer
 ### Admin API
 
 - `STATS_API_KEY`
+- `SHIELD_DEPLOY_NOTIFY_URL` (optional GitHub Actions secret; defaults to `https://www.ryzeon.wtf/__shield/deploy-notify`)
 
 ## Cloudflare Bindings
 
@@ -134,6 +135,8 @@ For GitHub auto-deploy, add repository secrets:
 - `CLOUDFLARE_ACCOUNT_ID`
 
 This repo includes a workflow at `.github/workflows/deploy-worker.yml` that deploys on push to `main`.
+
+After deploy, the workflow calls `POST /__shield/deploy-notify` so deployment webhooks are emitted immediately by CI (instead of waiting for user traffic).
 
 Set secrets:
 
