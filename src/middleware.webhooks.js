@@ -250,12 +250,31 @@ export async function sendDiscordWebhook(env, eventType, reason, details) {
   if (eventType === 'PASSED' && (passedEnabled === '0' || passedEnabled === 'false' || passedEnabled === 'off' || passedEnabled === 'no')) {
     return false;
   }
+  const parseWebhookTargets = (...values) => {
+    const out = [];
+    for (const raw of values) {
+      const normalized = String(raw || '')
+        .split(/[\n,]/)
+        .map((v) => v.trim())
+        .filter(Boolean);
+      for (const candidate of normalized) {
+        try {
+          const parsed = new URL(candidate);
+          if (parsed.protocol === 'http:' || parsed.protocol === 'https:') out.push(parsed.toString());
+        } catch {
+          // Ignore malformed URLs from env to avoid throwing in fetch loop.
+        }
+      }
+    }
+    return [...new Set(out)];
+  };
   const isDeployEvent = eventType === 'DEPLOYED' || eventType === 'SYSTEM_UPDATE';
-  const deployTarget = env?.DISCORD_WEBHOOK_URL_SYSTEM || env?.DISCORD_WEBHOOK_URL || env?.DISCORD_WEBHOOK_URL_2;
-  const runtimeTargets = [env?.DISCORD_WEBHOOK_URL, env?.DISCORD_WEBHOOK_URL_2].filter(Boolean);
+  const systemTargets = parseWebhookTargets(env?.DISCORD_WEBHOOK_URL_SYSTEM);
+  const runtimeTargets = parseWebhookTargets(env?.DISCORD_WEBHOOK_URL, env?.DISCORD_WEBHOOK_URL_2);
+  const deployTarget = systemTargets[0] || runtimeTargets[0] || null;
   const webhookTargets = isDeployEvent
     ? (deployTarget ? [deployTarget] : [])
-    : [...new Set(runtimeTargets)];
+    : runtimeTargets;
   if (webhookTargets.length === 0) return;
   if (!DISCORD_WORTHY.has(eventType)) return;
   const cooldownState = await getWebhookCooldownState(env, eventType, details);

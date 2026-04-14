@@ -35,13 +35,12 @@ jobs:
       - name: Notify Deploy Webhook
         env:
           DEPLOY_NOTIFY_KEY: ${{ secrets.DEPLOY_NOTIFY_KEY }}
-          STATS_API_KEY: ${{ secrets.STATS_API_KEY }}
           SHIELD_DEPLOY_NOTIFY_URL: ${{ secrets.SHIELD_DEPLOY_NOTIFY_URL }}
         run: |
           set -euo pipefail
           url="${SHIELD_DEPLOY_NOTIFY_URL:-https://www.ryzeon.wtf/__shield/deploy-notify}"
           payload="{\"source\":\"github-actions\",\"sha\":\"${GITHUB_SHA}\"}"
-          key="${DEPLOY_NOTIFY_KEY:-${STATS_API_KEY:-}}"
+          key="${DEPLOY_NOTIFY_KEY:-}"
 
           request_once() {
             local use_key="$1"
