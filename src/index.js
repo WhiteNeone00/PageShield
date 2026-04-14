@@ -827,7 +827,19 @@ export default {
     if (apiAuth('/__shield/whitelist-extra', 'POST') === 'unauthorized') return new Response('Unauthorized', { status: 401, headers: securityHeaders(new Headers()) });
 
     // Webhook Test (manual diagnostics)
-    if (apiAuth('/__shield/webhook-test', 'POST') === true) {
+    if (url.pathname === '/__shield/webhook-test' && method === 'POST') {
+      const webhookTestKey = String(env?.WEBHOOK_TEST_KEY || env?.STATS_API_KEY || '').trim();
+      if (!webhookTestKey) {
+        return new Response(JSON.stringify({ ok: false, error: 'Webhook test disabled: configure WEBHOOK_TEST_KEY or STATS_API_KEY' }), {
+          status: 503,
+          headers: securityHeaders(new Headers({ 'content-type': 'application/json', 'cache-control': 'no-store' })),
+        });
+      }
+      const authHeader = request.headers.get('authorization') || '';
+      if (authHeader !== 'Bearer ' + webhookTestKey) {
+        return new Response('Unauthorized', { status: 401, headers: securityHeaders(new Headers()) });
+      }
+
       let body = null;
       try {
         body = await request.json();
@@ -853,7 +865,6 @@ export default {
         headers: securityHeaders(new Headers({ 'content-type': 'application/json', 'cache-control': 'no-store' })),
       });
     }
-    if (apiAuth('/__shield/webhook-test', 'POST') === 'unauthorized') return new Response('Unauthorized', { status: 401, headers: securityHeaders(new Headers()) });
 
     // Deploy Notify (GitHub Actions -> Worker)
     if (url.pathname === '/__shield/deploy-notify' && method === 'POST') {
