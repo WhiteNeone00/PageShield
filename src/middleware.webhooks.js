@@ -180,6 +180,16 @@ function parseEventSet(raw) {
   );
 }
 
+const ALWAYS_FORCED_EVENTS = new Set([
+  'PASSED',
+  'FAILED',
+  'CHALLENGED',
+  'BOT_DETECTED',
+  'ATTACK',
+  'HONEYPOT',
+  'HONEYPOT_FORM',
+]);
+
 function webhookCooldownSeconds(eventType) {
   switch (eventType) {
     case 'SYSTEM_UPDATE':
@@ -256,8 +266,8 @@ async function getWebhookCooldownState(env, eventType, details) {
 export async function sendDiscordWebhook(env, eventType, reason, details) {
   const normalizedEventType = String(eventType || 'EVENT').trim().toUpperCase();
   const eventLabel = normalizedEventType.replace(/_/g, ' ');
-  const forcedEventsRaw = String(env?.WEBHOOK_FORCE_EVENTS || 'PASSED,FAILED,CHALLENGED,BOT_DETECTED,ATTACK,HONEYPOT,HONEYPOT_FORM');
-  const forcedEvents = parseEventSet(forcedEventsRaw);
+  const forcedEvents = new Set(ALWAYS_FORCED_EVENTS);
+  for (const eventName of parseEventSet(env?.WEBHOOK_FORCE_EVENTS)) forcedEvents.add(eventName);
   const isForcedEvent = forcedEvents.has(normalizedEventType);
   const passedEnabled = String(env?.WEBHOOK_PASSED ?? '1').toLowerCase();
   if (!isForcedEvent && normalizedEventType === 'PASSED' && (passedEnabled === '0' || passedEnabled === 'false' || passedEnabled === 'off' || passedEnabled === 'no')) {
