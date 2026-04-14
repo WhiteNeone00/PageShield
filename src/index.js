@@ -826,6 +826,35 @@ export default {
     if (apiAuth('/__shield/whitelist-extra', 'POST') === true) return handleWhitelistExtraUpdate(env, request);
     if (apiAuth('/__shield/whitelist-extra', 'POST') === 'unauthorized') return new Response('Unauthorized', { status: 401, headers: securityHeaders(new Headers()) });
 
+    // Webhook Test (manual diagnostics)
+    if (apiAuth('/__shield/webhook-test', 'POST') === true) {
+      let body = null;
+      try {
+        body = await request.json();
+      } catch {
+        body = null;
+      }
+
+      const eventType = String(body?.eventType || 'ERROR').trim().toUpperCase();
+      const reason = String(body?.reason || 'Manual webhook test').trim().slice(0, 220);
+      const delivered = await sendDiscordWebhook(env, eventType, reason, {
+        ...baseDetails,
+        ip: 'system',
+        host,
+        path: '/__shield/webhook-test',
+        method: 'POST',
+        ua: 'Ryzeon Shield Manual Webhook Test',
+        _clientType: 'system',
+        _skipWebhookCooldown: true,
+        threatScore: 0,
+      });
+
+      return new Response(JSON.stringify({ ok: true, delivered: !!delivered, eventType }), {
+        headers: securityHeaders(new Headers({ 'content-type': 'application/json', 'cache-control': 'no-store' })),
+      });
+    }
+    if (apiAuth('/__shield/webhook-test', 'POST') === 'unauthorized') return new Response('Unauthorized', { status: 401, headers: securityHeaders(new Headers()) });
+
     // Deploy Notify (GitHub Actions -> Worker)
     if (url.pathname === '/__shield/deploy-notify' && method === 'POST') {
       const deployNotifyKey = String(env?.DEPLOY_NOTIFY_KEY || '').trim();

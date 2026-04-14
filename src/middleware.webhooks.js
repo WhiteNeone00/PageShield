@@ -275,9 +275,15 @@ export async function sendDiscordWebhook(env, eventType, reason, details) {
   const webhookTargets = isDeployEvent
     ? (deployTarget ? [deployTarget] : [])
     : runtimeTargets;
-  if (webhookTargets.length === 0) return;
-  if (!DISCORD_WORTHY.has(eventType)) return;
-  const cooldownState = await getWebhookCooldownState(env, eventType, details);
+  if (webhookTargets.length === 0) {
+    console.warn('[shield:webhook] skipped: no webhook targets configured for event', eventType);
+    return false;
+  }
+  if (!DISCORD_WORTHY.has(eventType)) return false;
+  const bypassCooldown = details?._skipWebhookCooldown === true;
+  const cooldownState = bypassCooldown
+    ? { suppressed: false, key: null, cooldown: 0 }
+    : await getWebhookCooldownState(env, eventType, details);
   if (cooldownState.suppressed) return false;
 
   const nowIso = new Date().toISOString();
@@ -591,6 +597,23 @@ export async function sendDiscordWebhook(env, eventType, reason, details) {
       }))
     );
     const delivered = sends.some((r) => r.status === 'fulfilled' && r.value?.ok);
+    if (!delivered) {
+      const failures = [];
+      for (const result of sends) {
+        if (result.status === 'rejected') {
+          failures.push('network error: ' + String(result.reason || 'unknown'));
+          continue;
+        }
+        const resp = result.value;
+        if (resp?.ok) continue;
+        let bodySnippet = '';
+        try {
+          bodySnippet = clip(await resp.text(), 180);
+        } catch {}
+        failures.push(`http ${resp?.status || 'n/a'} ${resp?.statusText || ''} ${bodySnippet}`.trim());
+      }
+      console.error('[shield:webhook] delivery failed for event', eventType, failures.join(' | '));
+    }
     if (cooldownState.key && cooldownState.cooldown > 0) {
       // Always set in-memory cooldown (works even when KV writes are exhausted)
       memCooldown.set(cooldownState.key, Date.now() + cooldownState.cooldown * 1000);
