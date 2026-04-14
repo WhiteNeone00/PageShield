@@ -180,6 +180,25 @@ function parseEventSet(raw) {
   );
 }
 
+function clampDiscordFieldValue(value, maxLen = 1024) {
+  const text = String(value || 'N/A');
+  if (text.length <= maxLen) return text;
+
+  const ansiPrefix = '```ansi\n';
+  const fenceSuffix = '\n```';
+  if (text.startsWith(ansiPrefix)) {
+    const rawInner = text.slice(ansiPrefix.length).replace(/\n```\s*$/, '');
+    // If we must trim ANSI blocks, strip escape sequences first so Discord
+    // does not receive half-cut control codes rendered as garbage text.
+    const plainInner = rawInner.replace(/\u001b\[[0-9;]*m/g, '');
+    const budget = Math.max(0, maxLen - ansiPrefix.length - fenceSuffix.length - 1);
+    const body = clip(plainInner, budget);
+    return `${ansiPrefix}${body}\n${fenceSuffix.slice(1)}`;
+  }
+
+  return clip(text, maxLen);
+}
+
 const ALWAYS_FORCED_EVENTS = new Set([
   'PASSED',
   'FAILED',
@@ -630,7 +649,7 @@ export async function sendDiscordWebhook(env, eventType, reason, details) {
         embed.fields = embed.fields.slice(0, 25).map((field) => ({
           ...field,
           name: clip(String(field?.name || ''), 256),
-          value: clip(String(field?.value || 'N/A'), 1024),
+          value: clampDiscordFieldValue(field?.value || 'N/A', 1024),
         }));
       }
     }
