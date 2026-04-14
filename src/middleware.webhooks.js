@@ -256,15 +256,19 @@ async function getWebhookCooldownState(env, eventType, details) {
 export async function sendDiscordWebhook(env, eventType, reason, details) {
   const normalizedEventType = String(eventType || 'EVENT').trim().toUpperCase();
   const eventLabel = normalizedEventType.replace(/_/g, ' ');
+  const forcedEventsRaw = String(env?.WEBHOOK_FORCE_EVENTS || 'PASSED,FAILED,CHALLENGED,BOT_DETECTED,ATTACK,HONEYPOT,HONEYPOT_FORM');
+  const forcedEvents = parseEventSet(forcedEventsRaw);
+  const isForcedEvent = forcedEvents.has(normalizedEventType);
   const passedEnabled = String(env?.WEBHOOK_PASSED ?? '1').toLowerCase();
-  if (normalizedEventType === 'PASSED' && (passedEnabled === '0' || passedEnabled === 'false' || passedEnabled === 'off' || passedEnabled === 'no')) {
+  if (!isForcedEvent && normalizedEventType === 'PASSED' && (passedEnabled === '0' || passedEnabled === 'false' || passedEnabled === 'off' || passedEnabled === 'no')) {
     console.warn('[shield:webhook] PASSED webhook disabled by WEBHOOK_PASSED setting');
     return false;
   }
   const enabledEvents = parseEventSet(env?.WEBHOOK_EVENTS);
-  if (enabledEvents.size > 0 && !enabledEvents.has(normalizedEventType)) return false;
-  const forcedEventsRaw = String(env?.WEBHOOK_FORCE_EVENTS || 'PASSED,FAILED,CHALLENGED,BOT_DETECTED,ATTACK,HONEYPOT,HONEYPOT_FORM');
-  const forcedEvents = parseEventSet(forcedEventsRaw);
+  if (!isForcedEvent && enabledEvents.size > 0 && !enabledEvents.has(normalizedEventType)) {
+    console.warn('[shield:webhook] event filtered by WEBHOOK_EVENTS allowlist', normalizedEventType);
+    return false;
+  }
   const parseWebhookTargets = (...values) => {
     const out = [];
     for (const raw of values) {
@@ -295,7 +299,7 @@ export async function sendDiscordWebhook(env, eventType, reason, details) {
     return false;
   }
   if (!DISCORD_WORTHY.has(normalizedEventType)) return false;
-  const bypassCooldown = details?._skipWebhookCooldown === true || forcedEvents.has(normalizedEventType);
+  const bypassCooldown = details?._skipWebhookCooldown === true || isForcedEvent;
   const cooldownState = bypassCooldown
     ? { suppressed: false, key: null, cooldown: 0 }
     : await getWebhookCooldownState(env, normalizedEventType, details);
