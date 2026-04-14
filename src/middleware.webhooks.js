@@ -527,12 +527,12 @@ export async function sendDiscordWebhook(env, eventType, reason, details) {
     fields.push({
       name: `🔍 Scan Results  ·  ${detectionCount} detection${detectionCount !== 1 ? 's' : ''}`,
       value: '```ansi\n' + scanLines.join('\n') + '\n```',
-      inline: false,
+      inline: true,
     });
     fields.push({
       name: '📊 Factors',
       value: '```ansi\n' + factorLines.join('\n') + '\n```',
-      inline: false,
+      inline: true,
     });
   }
 
