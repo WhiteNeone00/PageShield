@@ -618,6 +618,24 @@ export async function sendDiscordWebhook(env, eventType, reason, details) {
     ...(buttons.length ? { components: [{ type: 1, components: buttons.slice(0, 5) }] } : {}),
   };
 
+  // Discord hard limits: title 256, description 4096, field name 256,
+  // field value 1024, max 25 fields, footer text 2048.
+  try {
+    const embed = payload?.embeds?.[0];
+    if (embed) {
+      embed.title = clip(String(embed.title || ''), 256);
+      embed.description = clip(String(embed.description || ''), 4096);
+      if (embed.footer?.text) embed.footer.text = clip(String(embed.footer.text), 2048);
+      if (Array.isArray(embed.fields)) {
+        embed.fields = embed.fields.slice(0, 25).map((field) => ({
+          ...field,
+          name: clip(String(field?.name || ''), 256),
+          value: clip(String(field?.value || 'N/A'), 1024),
+        }));
+      }
+    }
+  } catch {}
+
   try {
     const sends = await Promise.allSettled(
       webhookTargets.map((url) => fetch(url, {
