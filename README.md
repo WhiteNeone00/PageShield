@@ -72,10 +72,19 @@ If `STATS_API_KEY` is configured, these endpoints require `Authorization: Bearer
 - `DISCORD_WEBHOOK_URL`
 - `DISCORD_WEBHOOK_URL_2` (optional)
 - `DISCORD_WEBHOOK_URL_SYSTEM` (optional, deploy/system notifications)
+- `WEBHOOK_EVENTS` (optional CSV allowlist; if set, only listed event types are sent)
+- `WEBHOOK_FORCE_EVENTS` (optional CSV; listed events bypass cooldown dedupe)
+- `WEBHOOK_PASSED` (`1` by default; set `0` to disable PASSED notifications)
 - `SHIELD_DASHBOARD_URL` (optional button)
 - `SHIELD_EVENTS_URL` (optional button)
 - `SHIELD_SERVICES_URL` (optional button)
 - `SHIELD_PING_URL` (optional button)
+
+Example to force core challenge/security notifications every time:
+
+```bash
+WEBHOOK_FORCE_EVENTS="PASSED,FAILED,CHALLENGED,BOT_DETECTED,ATTACK,HONEYPOT,HONEYPOT_FORM"
+```
 
 ### Version / Release Metadata
 

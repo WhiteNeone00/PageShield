@@ -171,6 +171,15 @@ function compactWebhookReason(reason) {
   return text;
 }
 
+function parseEventSet(raw) {
+  return new Set(
+    String(raw || '')
+      .split(',')
+      .map((v) => v.trim().toUpperCase())
+      .filter(Boolean)
+  );
+}
+
 function webhookCooldownSeconds(eventType) {
   switch (eventType) {
     case 'SYSTEM_UPDATE':
@@ -245,11 +254,16 @@ async function getWebhookCooldownState(env, eventType, details) {
 
 // ─── Discord Webhook (APP-style embed) ───────────────────────────
 export async function sendDiscordWebhook(env, eventType, reason, details) {
-  const eventLabel = String(eventType || 'EVENT').replace(/_/g, ' ');
+  const normalizedEventType = String(eventType || 'EVENT').trim().toUpperCase();
+  const eventLabel = normalizedEventType.replace(/_/g, ' ');
   const passedEnabled = String(env?.WEBHOOK_PASSED ?? '1').toLowerCase();
-  if (eventType === 'PASSED' && (passedEnabled === '0' || passedEnabled === 'false' || passedEnabled === 'off' || passedEnabled === 'no')) {
+  if (normalizedEventType === 'PASSED' && (passedEnabled === '0' || passedEnabled === 'false' || passedEnabled === 'off' || passedEnabled === 'no')) {
     return false;
   }
+  const enabledEvents = parseEventSet(env?.WEBHOOK_EVENTS);
+  if (enabledEvents.size > 0 && !enabledEvents.has(normalizedEventType)) return false;
+  const forcedEventsRaw = String(env?.WEBHOOK_FORCE_EVENTS || 'PASSED,FAILED,CHALLENGED,BOT_DETECTED,ATTACK,HONEYPOT,HONEYPOT_FORM');
+  const forcedEvents = parseEventSet(forcedEventsRaw);
   const parseWebhookTargets = (...values) => {
     const out = [];
     for (const raw of values) {
@@ -268,7 +282,7 @@ export async function sendDiscordWebhook(env, eventType, reason, details) {
     }
     return [...new Set(out)];
   };
-  const isDeployEvent = eventType === 'DEPLOYED' || eventType === 'SYSTEM_UPDATE';
+  const isDeployEvent = normalizedEventType === 'DEPLOYED' || normalizedEventType === 'SYSTEM_UPDATE';
   const systemTargets = parseWebhookTargets(env?.DISCORD_WEBHOOK_URL_SYSTEM);
   const runtimeTargets = parseWebhookTargets(env?.DISCORD_WEBHOOK_URL, env?.DISCORD_WEBHOOK_URL_2);
   const deployTarget = systemTargets[0] || runtimeTargets[0] || null;
@@ -276,25 +290,25 @@ export async function sendDiscordWebhook(env, eventType, reason, details) {
     ? (deployTarget ? [deployTarget] : [])
     : runtimeTargets;
   if (webhookTargets.length === 0) {
-    console.warn('[shield:webhook] skipped: no webhook targets configured for event', eventType);
+    console.warn('[shield:webhook] skipped: no webhook targets configured for event', normalizedEventType);
     return false;
   }
-  if (!DISCORD_WORTHY.has(eventType)) return false;
-  const bypassCooldown = details?._skipWebhookCooldown === true;
+  if (!DISCORD_WORTHY.has(normalizedEventType)) return false;
+  const bypassCooldown = details?._skipWebhookCooldown === true || forcedEvents.has(normalizedEventType);
   const cooldownState = bypassCooldown
     ? { suppressed: false, key: null, cooldown: 0 }
-    : await getWebhookCooldownState(env, eventType, details);
+    : await getWebhookCooldownState(env, normalizedEventType, details);
   if (cooldownState.suppressed) return false;
 
   const nowIso = new Date().toISOString();
-  const color = WEBHOOK_COLORS[eventType] || 0x5865F2;
+  const color = WEBHOOK_COLORS[normalizedEventType] || 0x5865F2;
   const score = Number(details.threatScore || 0);
   const severity = severityLabel(score);
   const bar = threatBar(score);
-  const meta = eventMeta(eventType);
-  const isBad = ['BLOCKED', 'HARD_BLOCKED', 'HONEYPOT', 'FAILED', 'ATTACK', 'SUSPENDED', 'BOT_FARM', 'HONEYPOT_FORM'].includes(eventType);
-  const isGood = eventType === 'PASSED';
-  const isError = eventType === 'ERROR';
+  const meta = eventMeta(normalizedEventType);
+  const isBad = ['BLOCKED', 'HARD_BLOCKED', 'HONEYPOT', 'FAILED', 'ATTACK', 'SUSPENDED', 'BOT_FARM', 'HONEYPOT_FORM'].includes(normalizedEventType);
+  const isGood = normalizedEventType === 'PASSED';
+  const isError = normalizedEventType === 'ERROR';
   const flags = triggerFlags(details);
   const statusBadge = isDeployEvent ? '🟢 LIVE' : isError ? '🟠 ERROR' : isGood ? '🟢 ALLOWED' : isBad ? '🔴 BLOCKED' : '🟡 CHALLENGED';
   const displayReason = compactWebhookReason(reason);
@@ -358,7 +372,7 @@ export async function sendDiscordWebhook(env, eventType, reason, details) {
   const description = isDeployEvent
     ? [
         '```ansi',
-        `${A.bGreen}${eventType === 'DEPLOYED' ? '◆ DEPLOYED RUNNING' : '◆ SYSTEM UPDATED'}${A.reset}`,
+        `${A.bGreen}${normalizedEventType === 'DEPLOYED' ? '◆ DEPLOYED RUNNING' : '◆ SYSTEM UPDATED'}${A.reset}`,
         `${A.white}Status: ${A.bWhite}PageShield got updated and is running live${A.reset}`,
         `${A.white}Build:   ${A.gray}${clip(shortVersionId(details._previousDeployedVersion || 'none') + ' → ' + shortVersionId(details._deployedVersion || 'latest'), 40)}${A.reset}`,
         `${A.white}Source:  ${A.gray}${clip(String(details._sourceRevision || 'unknown'), 40)}${A.reset}`,
@@ -612,7 +626,7 @@ export async function sendDiscordWebhook(env, eventType, reason, details) {
         } catch {}
         failures.push(`http ${resp?.status || 'n/a'} ${resp?.statusText || ''} ${bodySnippet}`.trim());
       }
-      console.error('[shield:webhook] delivery failed for event', eventType, failures.join(' | '));
+      console.error('[shield:webhook] delivery failed for event', normalizedEventType, failures.join(' | '));
     }
     if (cooldownState.key && cooldownState.cooldown > 0) {
       // Always set in-memory cooldown (works even when KV writes are exhausted)
