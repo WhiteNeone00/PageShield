@@ -289,7 +289,8 @@ export async function sendDiscordWebhook(env, eventType, reason, details) {
   };
   const isDeployEvent = normalizedEventType === 'DEPLOYED' || normalizedEventType === 'SYSTEM_UPDATE';
   const systemTargets = parseWebhookTargets(env?.DISCORD_WEBHOOK_URL_SYSTEM);
-  const runtimeTargets = parseWebhookTargets(env?.DISCORD_WEBHOOK_URL, env?.DISCORD_WEBHOOK_URL_2);
+  const runtimeTargetsRaw = parseWebhookTargets(env?.DISCORD_WEBHOOK_URL, env?.DISCORD_WEBHOOK_URL_2);
+  const runtimeTargets = runtimeTargetsRaw.length > 0 ? runtimeTargetsRaw : systemTargets;
   const deployTarget = systemTargets[0] || runtimeTargets[0] || null;
   const webhookTargets = isDeployEvent
     ? (deployTarget ? [deployTarget] : [])
