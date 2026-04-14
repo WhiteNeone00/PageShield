@@ -1337,7 +1337,7 @@ export default {
 
       ctx.waitUntil(storeBehaviorProfile(env, { event: 'PASSED', fpHash: safeFp, ip, asn, country }));
       ctx.waitUntil(Promise.all([
-        sendDiscordWebhookDelayed(env, 'PASSED', 'Challenge Solved', baseDetails, 3000),
+        sendDiscordWebhook(env, 'PASSED', 'Challenge Solved', baseDetails),
         logToD1(env, 'PASSED', 'PoW verified', baseDetails),
         incrementKvStat(env, 'passed'),
         incrementKvStat(env, 'total'),

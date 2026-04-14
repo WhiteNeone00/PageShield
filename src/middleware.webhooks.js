@@ -258,6 +258,7 @@ export async function sendDiscordWebhook(env, eventType, reason, details) {
   const eventLabel = normalizedEventType.replace(/_/g, ' ');
   const passedEnabled = String(env?.WEBHOOK_PASSED ?? '1').toLowerCase();
   if (normalizedEventType === 'PASSED' && (passedEnabled === '0' || passedEnabled === 'false' || passedEnabled === 'off' || passedEnabled === 'no')) {
+    console.warn('[shield:webhook] PASSED webhook disabled by WEBHOOK_PASSED setting');
     return false;
   }
   const enabledEvents = parseEventSet(env?.WEBHOOK_EVENTS);
