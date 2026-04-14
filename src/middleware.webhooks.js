@@ -188,12 +188,20 @@ function clampDiscordFieldValue(value, maxLen = 1024) {
   const fenceSuffix = '\n```';
   if (text.startsWith(ansiPrefix)) {
     const rawInner = text.slice(ansiPrefix.length).replace(/\n```\s*$/, '');
-    // If we must trim ANSI blocks, strip escape sequences first so Discord
-    // does not receive half-cut control codes rendered as garbage text.
-    const plainInner = rawInner.replace(/\u001b\[[0-9;]*m/g, '');
-    const budget = Math.max(0, maxLen - ansiPrefix.length - fenceSuffix.length - 1);
-    const body = clip(plainInner, budget);
-    return `${ansiPrefix}${body}\n${fenceSuffix.slice(1)}`;
+    const budget = Math.max(0, maxLen - ansiPrefix.length - fenceSuffix.length);
+    const lines = rawInner.split('\n');
+    const kept = [];
+    let used = 0;
+    for (const line of lines) {
+      const next = kept.length === 0 ? line : `\n${line}`;
+      if (used + next.length > budget) break;
+      kept.push(line);
+      used += next.length;
+    }
+    let body = kept.join('\n');
+    if (!body) body = clip(rawInner, budget);
+    if (!body.endsWith('\u001b[0m')) body += '\u001b[0m';
+    return `${ansiPrefix}${body}${fenceSuffix}`;
   }
 
   return clip(text, maxLen);
