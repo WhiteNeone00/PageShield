@@ -504,43 +504,34 @@ export async function sendDiscordWebhook(env, eventType, reason, details) {
     const mark = (on) => on ? `${A.bRed}■${A.reset}` : `${A.green}□${A.reset}`;
     const scanItem = (label, on) => `${mark(on)} ${(on ? A.white : A.gray)}${label}${A.reset}`;
     const scanLines = [
-      `${ansiPadEnd(scanItem('Bot', details._suspicious), scanPairWidth)} ${scanItem('Headless', details._headless)}`,
-      `${ansiPadEnd(scanItem('VPN/Proxy', details._vpn), scanPairWidth)} ${scanItem('AI Crawl', details._aiCrawler)}`,
-      `${ansiPadEnd(scanItem('DDoS', details._ddosSuspect), scanPairWidth)} ${scanItem('Rate Lim', details._spam)}`,
-      `${ansiPadEnd(scanItem('Bot Farm', details._isBotFarm), scanPairWidth)} ${scanItem('Attack', hasAttack)}`,
-      `${ansiPadEnd(scanItem('Smuggle', details._requestSmugglingSignal), scanPairWidth)} ${scanItem('Cookie Abuse', Number(details._cookieHeaderLength || 0) > 2500)}`,
-      `${ansiPadEnd(scanItem('Cmd Client', details._commandLineClient), scanPairWidth)} ${scanItem('Data Crawler', details._dataCrawlerUa)}`,
-      `${ansiPadEnd(scanItem('Proxy Hdr', details._proxyHeaderAnomaly), scanPairWidth)} ${scanItem('Long URL', details._longUrlSignal)}`,
-      `${ansiPadEnd(scanItem('Method Tunnel', details._methodTunnelingSignal || details._methodTunnelProbe), scanPairWidth)} ${scanItem('Encoding Evade', details._encodingEvasionSignal || details._encodingEvasion)}`,
-      `${ansiPadEnd(scanItem('ProtoPoll', details._prototypePollution), scanPairWidth)} ${scanItem('Deserialize', details._deserializationProbe)}`,
-      `${ansiPadEnd(scanItem('Open Redirect', details._openRedirectProbe), scanPairWidth)} ${scanItem('Hdr Flood', Number(details._headerCount || 0) > 48)}`,
+      `${ansiPadEnd(scanItem('Bot', details._suspicious), 20)} ${scanItem('Headless', details._headless)}`,
+      `${ansiPadEnd(scanItem('VPN/Proxy', details._vpn), 20)} ${scanItem('AI Crawl', details._aiCrawler)}`,
+      `${ansiPadEnd(scanItem('DDoS', details._ddosSuspect), 20)} ${scanItem('Rate Lim', details._spam)}`,
+      `${ansiPadEnd(scanItem('Bot Farm', details._isBotFarm), 20)} ${scanItem('Attack', hasAttack)}`,
+      `${ansiPadEnd(scanItem('Smuggle', details._requestSmugglingSignal), 20)} ${scanItem('Cookie Abuse', Number(details._cookieHeaderLength || 0) > 2500)}`,
+      `${ansiPadEnd(scanItem('Cmd Client', details._commandLineClient), 20)} ${scanItem('Data Crawler', details._dataCrawlerUa)}`,
+      `${ansiPadEnd(scanItem('Proxy Hdr', details._proxyHeaderAnomaly), 20)} ${scanItem('Long URL', details._longUrlSignal)}`,
+      `${ansiPadEnd(scanItem('Method Tunnel', details._methodTunnelingSignal || details._methodTunnelProbe), 20)} ${scanItem('Encoding Evade', details._encodingEvasionSignal || details._encodingEvasion)}`,
+      `${ansiPadEnd(scanItem('ProtoPoll', details._prototypePollution), 20)} ${scanItem('Deserialize', details._deserializationProbe)}`,
+      `${ansiPadEnd(scanItem('Open Redirect', details._openRedirectProbe), 20)} ${scanItem('Hdr Flood', Number(details._headerCount || 0) > 48)}`,
     ];
-
     const factorLines = [
-      `${A.white}Headers${A.reset}  ${hps >= 6 ? A.green : A.yellow}${hps}/8${A.reset}`,
-      ipRepScore !== 0
-        ? `${A.white}IP Reputation${A.reset}  ${ipRepScore > 50 ? A.bRed : A.yellow}${ipRepScore}${A.reset}`
-        : `${A.white}IP Reputation${A.reset}  ${A.green}0${A.reset}`,
-      ipRate > 0
-        ? `${A.white}Rate${A.reset}  ${ipRate > 10 ? A.bRed : A.cyan}${ipRate}/10s${A.reset}`
-        : `${A.white}Rate${A.reset}  ${A.green}0/10s${A.reset}`,
-      tlsS > 0
-        ? `${A.white}TLS/Pattern${A.reset}  ${A.yellow}+${tlsS}${A.reset}`
-        : (patS > 0 ? `${A.white}TLS/Pattern${A.reset}  ${A.yellow}+${patS}${A.reset}` : `${A.white}TLS/Pattern${A.reset}  ${A.green}0${A.reset}`),
-      `${A.white}Header Count${A.reset}  ${headerCount > 48 ? A.bRed : A.cyan}${headerCount}${A.reset}`,
-      `${A.white}Cookie Len${A.reset}  ${cookieHeaderLength > 2500 ? A.bRed : A.cyan}${cookieHeaderLength}${A.reset}`,
+      `${A.white}Headers${A.reset} ${hps >= 6 ? A.green : A.yellow}${hps}/8${A.reset}`,
+      `${A.white}IP Reputation${A.reset} ${ipRepScore !== 0 ? (ipRepScore > 50 ? A.bRed : A.yellow) + ipRepScore + A.reset : A.green + '0' + A.reset}`,
+      `${A.white}Rate${A.reset} ${ipRate > 0 ? (ipRate > 10 ? A.bRed : A.cyan) + ipRate + '/10s' + A.reset : A.green + '0/10s' + A.reset}`,
+      `${A.white}TLS/Pattern${A.reset} ${tlsS > 0 ? A.yellow + '+' + tlsS + A.reset : (patS > 0 ? A.yellow + '+' + patS + A.reset : A.green + '0' + A.reset)}`,
+      `${A.white}Header Count${A.reset} ${headerCount > 48 ? A.bRed : A.cyan}${headerCount}${A.reset}`,
+      `${A.white}Cookie Len${A.reset} ${cookieHeaderLength > 2500 ? A.bRed : A.cyan}${cookieHeaderLength}${A.reset}`,
     ];
 
-    const rowCount = Math.max(scanLines.length, factorLines.length);
-    const combinedLines = [];
-    for (let i = 0; i < rowCount; i++) {
-      const left = scanLines[i] || '';
-      const right = factorLines[i] || '';
-      combinedLines.push(ansiPadEnd(left, scanSectionWidth) + ' '.repeat(scanFactorsGap) + right);
-    }
     fields.push({
-      name: `🔍 Scan Results  ·  ${detectionCount} detection${detectionCount !== 1 ? 's' : ''}  ·  📊 Factors`,
-      value: '```ansi\n' + combinedLines.join('\n') + '\n```',
+      name: `🔍 Scan Results  ·  ${detectionCount} detection${detectionCount !== 1 ? 's' : ''}`,
+      value: '```ansi\n' + scanLines.join('\n') + '\n```',
+      inline: false,
+    });
+    fields.push({
+      name: '📊 Factors',
+      value: '```ansi\n' + factorLines.join('\n') + '\n```',
       inline: false,
     });
   }
