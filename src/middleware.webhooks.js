@@ -524,15 +524,18 @@ export async function sendDiscordWebhook(env, eventType, reason, details) {
       `${A.white}Cookie Len${A.reset} ${cookieHeaderLength > 2500 ? A.bRed : A.cyan}${cookieHeaderLength}${A.reset}`,
     ];
 
+    const rowCount = Math.max(scanLines.length, factorLines.length);
+    const combinedLines = [];
+    for (let i = 0; i < rowCount; i++) {
+      const left = scanLines[i] || '';
+      const right = factorLines[i] || '';
+      combinedLines.push(ansiPadEnd(left, 38) + '   ' + right);
+    }
+
     fields.push({
-      name: `🔍 Scan Results  ·  ${detectionCount} detection${detectionCount !== 1 ? 's' : ''}`,
-      value: '```ansi\n' + scanLines.join('\n') + '\n```',
-      inline: true,
-    });
-    fields.push({
-      name: '📊 Factors',
-      value: '```ansi\n' + factorLines.join('\n') + '\n```',
-      inline: true,
+      name: `🔍 Scan Results  ·  ${detectionCount} detection${detectionCount !== 1 ? 's' : ''}  ·  📊 Factors`,
+      value: '```ansi\n' + combinedLines.join('\n') + '\n```',
+      inline: false,
     });
   }
 
