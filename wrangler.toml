@@ -5,15 +5,12 @@ workers_dev = true
 account_id = "1f6a47bf7e2f4a9b77a90d9fa47294e1"
 version_metadata = { binding = "SHIELD_VERSION_METADATA" }
 
-# Route coverage:
-# - Explicitly pin eu-api host to this worker
-# - Protect all on ryzeon.wtf/*
-# - Explicitly protect all on www.ryzeon.wtf/*
-# - Protect all on *.ryzeon.wtf/*
+# Route coverage (non-overlapping canonical patterns):
+# - Protect apex domain paths
+# - Protect all subdomains (includes www and eu-api)
 routes = [
-  { pattern = "eu-api.ryzeon.wtf/", zone_name = "ryzeon.wtf" },
-  { pattern = "www.ryzeon.wtf/*", zone_name = "ryzeon.wtf" },
-  { pattern = "*.ryzeon.wtf/", zone_name = "ryzeon.wtf" },
+  { pattern = "ryzeon.wtf/*", zone_name = "ryzeon.wtf" },
+  { pattern = "*.ryzeon.wtf/*", zone_name = "ryzeon.wtf" },
 ]
 
 # ── KV namespace for analytics counters ──
